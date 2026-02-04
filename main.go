@@ -14,7 +14,8 @@ import (
 )
 
 type Config struct {
-	SoundPath string `yaml:"sound_path"`
+	SoundPath   string `yaml:"sound_path"`
+	DefaultTime string `yaml:"default_time"`
 }
 
 func playSound(path string) {
@@ -92,16 +93,9 @@ func (m model) View() string {
 }
 
 func main() {
-	if len(os.Args) < 2 {
-		fmt.Println("Usage: promo <duration>")
-		os.Exit(1)
-	}
 
-	duration, err := time.ParseDuration(os.Args[1])
-	if err != nil {
-		fmt.Println("Invalid duration:", err)
-		os.Exit(1)
-	}
+	var duration time.Duration
+	var err error
 
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -122,6 +116,20 @@ func main() {
 		decoder := yaml.NewDecoder(f)
 		if err := decoder.Decode(&config); err != nil {
 			fmt.Println("Error decoding config file:", err)
+			os.Exit(1)
+		}
+	}
+
+	if len(os.Args) == 2 {
+		duration, err = time.ParseDuration(os.Args[1])
+		if err != nil {
+			fmt.Println("Invalid duration:", err)
+			os.Exit(1)
+		}
+	} else {
+		duration, err = time.ParseDuration(config.DefaultTime)
+		if err != nil {
+			fmt.Println("Invalid default duration:", err)
 			os.Exit(1)
 		}
 	}
