@@ -1,0 +1,181 @@
+package main
+
+import (
+	"time"
+
+	"github.com/charmbracelet/bubbles/help"
+	"github.com/charmbracelet/bubbles/key"
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+)
+
+type screen int
+
+const (
+	screenMenu screen = iota
+	screenPomodoro
+	screenTimer
+	screenAlarmSet
+	screenAlarm
+	screenSettings
+)
+
+type tickMsg time.Time
+
+// A single tick chain drives every countdown, so timers keep running in the
+// background while another screen is open.
+func tick() tea.Cmd {
+	return tea.Tick(250*time.Millisecond, func(t time.Time) tea.Msg { return tickMsg(t) })
+}
+
+type app struct {
+	cfg           Config
+	cfgPath       string
+	st            styles
+	help          help.Model
+	width, height int
+	screen        screen
+	oneShot       bool // launched via a CLI shortcut: quit when that mode finishes
+	warning       string
+
+	editor   lengthEditor
+	menu     menuModel
+	pomo     pomodoro
+	timer    timerModel
+	alarm    alarmModel
+	settings settingsModel
+}
+
+func newApp(cfg Config, path string) *app {
+	a := &app{cfgPath: path}
+	a.applyConfig(cfg)
+	return a
+}
+
+func (a *app) applyConfig(cfg Config) {
+	a.cfg = cfg
+	a.st = newStyles(cfg.UI)
+	showAll := a.help.ShowAll
+	a.help = newHelp(a.st)
+	a.help.ShowAll = showAll
+}
+
+func (a *app) toMenu() {
+	a.screen = screenMenu
+	a.oneShot = false
+}
+
+func (a *app) shutdown() {
+	a.alarm.loop.Stop()
+}
+
+func (a *app) Init() tea.Cmd { return tick() }
+
+func (a *app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		a.width, a.height = msg.Width, msg.Height
+		return a, nil
+
+	case tickMsg:
+		return a, tea.Batch(tick(), a.pomo.tick(a), a.timer.tick(a), a.alarm.tick(a))
+
+	case tea.KeyMsg:
+		if key.Matches(msg, keys.ForceQuit) {
+			a.shutdown()
+			return a, tea.Quit
+		}
+		if a.editor.active {
+			return a, a.editor.update(msg)
+		}
+		typing := a.screen == screenSettings && a.settings.mode == modeInsert
+		if !typing && key.Matches(msg, keys.Help) {
+			a.help.ShowAll = !a.help.ShowAll
+			return a, nil
+		}
+		switch a.screen {
+		case screenMenu:
+			return a, a.menu.update(a, msg)
+		case screenPomodoro:
+			return a, a.pomo.update(a, msg)
+		case screenTimer:
+			return a, a.timer.update(a, msg)
+		case screenAlarmSet:
+			return a, a.alarm.updateSetter(a, msg)
+		case screenAlarm:
+			return a, a.alarm.update(a, msg)
+		case screenSettings:
+			return a, a.settings.update(a, msg)
+		}
+	}
+	return a, nil
+}
+
+func (a *app) View() string {
+	if a.editor.active {
+		return a.editor.view(a)
+	}
+	switch a.screen {
+	case screenPomodoro:
+		return a.pomo.view(a)
+	case screenTimer:
+		return a.timer.view(a)
+	case screenAlarmSet:
+		return a.alarm.viewSetter(a)
+	case screenAlarm:
+		return a.alarm.view(a)
+	case screenSettings:
+		return a.settings.view(a)
+	default:
+		return a.menu.view(a)
+	}
+}
+
+// frame wraps a screen body in a bordered card with the help footer and
+// centers it in the window.
+func (a *app) frame(body string, border lipgloss.TerminalColor, hk helpKeys) string {
+	parts := []string{a.st.card.BorderForeground(border).Render(body)}
+	if a.cfg.UI.ShowHelp {
+		a.help.Width = a.width
+		parts = append(parts, "", a.help.View(hk))
+	}
+	out := lipgloss.JoinVertical(lipgloss.Center, parts...)
+	if a.width == 0 {
+		return out
+	}
+	if !a.cfg.UI.Fullscreen {
+		return lipgloss.PlaceHorizontal(a.width, lipgloss.Center, out)
+	}
+	return lipgloss.Place(a.width, a.height, lipgloss.Center, lipgloss.Center, out)
+}
+
+// clock renders a duration in big block digits, or plain text when disabled
+// or when the terminal is too narrow.
+func (a *app) clock(d time.Duration, color lipgloss.TerminalColor) string {
+	return a.bigOrPlain(formatDuration(d), color)
+}
+
+func (a *app) bigOrPlain(s string, color lipgloss.TerminalColor) string {
+	style := lipgloss.NewStyle().Foreground(color).Bold(true)
+	if a.cfg.UI.BigClock && (a.width == 0 || bigTextWidth(s)+14 <= a.width) {
+		return style.Render(bigText(s))
+	}
+	return style.Render(s)
+}
+
+// progress draws a bar in the given gradient; nil uses the configured one.
+func (a *app) progress(percent float64, grad *[2]string) string {
+	from, to := a.cfg.UI.BarStartColor, a.cfg.UI.BarEndColor
+	if grad != nil {
+		from, to = grad[0], grad[1]
+	}
+	w := a.cfg.UI.BarWidth
+	if a.width > 0 {
+		w = min(w, a.width-14)
+	}
+	return newBar(from, to, max(w, 10)).ViewAs(percent)
+}
+
+func blinkOn() bool {
+	return time.Now().UnixMilli()/500%2 == 0
+}

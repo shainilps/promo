@@ -3,148 +3,81 @@ package main
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"time"
 
-	"github.com/charmbracelet/bubbles/progress"
-	"github.com/charmbracelet/bubbles/timer"
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
-	"gopkg.in/yaml.v3"
 )
 
-type Config struct {
-	SoundPath   string `yaml:"sound_path"`
-	DefaultTime string `yaml:"default_time"`
-}
+const usage = `promo - pomodoro, timer and alarm in your terminal
 
-func playSound(path string) {
-	exec.Command("pw-play", path).Run()
-}
+usage:
+  promo                 open the menu
+  promo <duration>      start a timer right away (e.g. promo 25m)
+  promo pomodoro        start a pomodoro right away
+  promo alarm <time>    set an alarm right away (e.g. promo alarm 07:30, promo alarm 7:30pm)
 
-type model struct {
-	timer     timer.Model
-	progress  progress.Model
-	total     time.Duration
-	soundPath string
-}
+config: ~/.config/promo/config.yaml (edit it from Settings in the menu)
+`
 
-func (m model) Init() tea.Cmd {
-	return m.timer.Start()
-}
-
-func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	switch msg := msg.(type) {
-	case timer.TickMsg:
-		var cmd tea.Cmd
-		m.timer, cmd = m.timer.Update(msg)
-		return m, cmd
-
-	case timer.TimeoutMsg:
-		{
-			if m.soundPath != "" {
-				go playSound(m.soundPath)
-			}
-			return m, tea.Quit
-		}
-	case tea.KeyMsg:
-		if msg.Type == tea.KeyCtrlC {
-			return m, tea.Quit
-		}
-		return m, nil
-
-	case timer.StartStopMsg:
-		var cmd tea.Cmd
-		m.timer, cmd = m.timer.Update(msg)
-		return m, cmd
-
-	case tea.WindowSizeMsg:
-		m.progress.Width = min(msg.Width-10, 80)
-		return m, nil
-
-	default:
-		return m, nil
-	}
-}
-
-func (m model) View() string {
-	remainingTime := m.timer.Timeout
-	totalTime := m.total
-
-	formatTime := func(d time.Duration) string {
-		minutes := int(d.Minutes())
-		seconds := int(d.Seconds()) % 60
-		return fmt.Sprintf("%02d:%02d", minutes, seconds)
-	}
-
-	timeInfo := fmt.Sprintf("%s / %s", formatTime(remainingTime), formatTime(totalTime))
-
-	percent := 1.0 - m.timer.Timeout.Seconds()/m.total.Seconds()
-
-	return lipgloss.Place(
-		100, 3,
-		lipgloss.Center, lipgloss.Center,
-		lipgloss.JoinVertical(
-			lipgloss.Center,
-			timeInfo,
-			m.progress.ViewAs(percent),
-		),
-	)
+func fail(format string, args ...any) {
+	fmt.Fprintf(os.Stderr, format+"\n", args...)
+	os.Exit(1)
 }
 
 func main() {
-
-	var duration time.Duration
-	var err error
-
-	home, err := os.UserHomeDir()
+	path, err := configPath()
 	if err != nil {
-		fmt.Println("Error getting home dir:", err)
-		os.Exit(1)
+		fail("Error getting home dir: %v", err)
+	}
+	cfg, warnings, err := loadConfig(path)
+	if err != nil {
+		fail("Error loading config: %v", err)
 	}
 
-	configPath := fmt.Sprintf("%s/.config/promo/config.yaml", home)
-	var config Config
-	if _, err := os.Stat(configPath); err == nil {
-		f, err := os.Open(configPath)
+	a := newApp(cfg, path)
+	if len(warnings) > 0 {
+		a.warning = warnings[0]
+		if len(warnings) > 1 {
+			a.warning += fmt.Sprintf(" (+%d more)", len(warnings)-1)
+		}
+	}
+
+	args := os.Args[1:]
+	switch {
+	case len(args) == 0:
+	case args[0] == "-h" || args[0] == "--help" || args[0] == "help":
+		fmt.Print(usage)
+		return
+	case args[0] == "alarm":
+		if len(args) != 2 {
+			fail("usage: promo alarm <time>  (e.g. promo alarm 07:30)")
+		}
+		h, m, err := parseClock(args[1])
 		if err != nil {
-			fmt.Println("Error opening config file:", err)
-			os.Exit(1)
+			fail("%v", err)
 		}
-		defer f.Close()
-
-		decoder := yaml.NewDecoder(f)
-		if err := decoder.Decode(&config); err != nil {
-			fmt.Println("Error decoding config file:", err)
-			os.Exit(1)
+		a.alarm.arm(nextOccurrence(h, m))
+		a.screen, a.oneShot = screenAlarm, true
+	case args[0] == "pomodoro" || args[0] == "pomo":
+		a.pomo.begin(cfg)
+		a.screen = screenPomodoro
+	case len(args) == 1:
+		d, err := time.ParseDuration(args[0])
+		if err != nil || d <= 0 {
+			fail("Invalid duration: %s\n\n%s", args[0], usage)
 		}
+		a.timer.begin(d)
+		a.screen, a.oneShot = screenTimer, true
+	default:
+		fail("%s", usage)
 	}
 
-	if len(os.Args) == 2 {
-		duration, err = time.ParseDuration(os.Args[1])
-		if err != nil {
-			fmt.Println("Invalid duration:", err)
-			os.Exit(1)
-		}
-	} else {
-		duration, err = time.ParseDuration(config.DefaultTime)
-		if err != nil {
-			fmt.Println("Invalid default duration:", err)
-			os.Exit(1)
-		}
+	var opts []tea.ProgramOption
+	if cfg.UI.Fullscreen {
+		opts = append(opts, tea.WithAltScreen())
 	}
-
-	m := model{
-		timer:     timer.NewWithInterval(duration, time.Second),
-		progress:  progress.New(progress.WithDefaultGradient()),
-		total:     duration,
-		soundPath: config.SoundPath,
+	if _, err := tea.NewProgram(a, opts...).Run(); err != nil {
+		fail("Error running program: %v", err)
 	}
-
-	p := tea.NewProgram(m)
-
-	if _, err := p.Run(); err != nil {
-		fmt.Println("Error running program:", err)
-		os.Exit(1)
-	}
+	a.shutdown()
 }
