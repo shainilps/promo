@@ -15,12 +15,6 @@ func start(name string, args ...string) {
 	go cmd.Wait()
 }
 
-func playOnce(path string) {
-	if path != "" {
-		start("pw-play", path)
-	}
-}
-
 // soundLoop replays a sound until Stop is called.
 type soundLoop struct {
 	cancel context.CancelFunc

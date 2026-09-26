@@ -69,7 +69,7 @@ func (p *pomodoro) finish(a *app, silent bool) {
 	if silent {
 		return
 	}
-	playOnce(a.cfg.soundFor(false))
+	a.ring(screenPomodoro)
 	if p.phase == phaseFocus {
 		notify(a.cfg, "Focus session done",
 			fmt.Sprintf("Session %d complete. Start your %s break when ready.", p.sessions, shortDuration(p.breakLen)), "normal")
@@ -194,7 +194,7 @@ func (p *pomodoro) view(a *app) string {
 				lengths,
 				adjustHint,
 				"",
-				phaseStyle.Render("press enter to start your break"),
+				phaseStyle.Render("press space to start your break"),
 			}
 		} else {
 			rows = []string{
@@ -205,10 +205,14 @@ func (p *pomodoro) view(a *app) string {
 				lengths,
 				adjustHint,
 				"",
-				lipgloss.NewStyle().Bold(true).Foreground(colorFocus).Render("press enter to start focusing"),
+				lipgloss.NewStyle().Bold(true).Foreground(colorFocus).Render("press space to start focusing"),
 			}
 		}
-		rows = append(rows, "", st.muted.Render("waiting "+shortDuration(time.Since(p.waitingSince).Truncate(time.Second))), "", tomatoes)
+		status := st.muted.Render("waiting " + shortDuration(time.Since(p.waitingSince).Truncate(time.Second)))
+		if a.ringing != nil {
+			status = ringingHint(color)
+		}
+		rows = append(rows, "", status, "", tomatoes)
 		hk = helpKeys{keys.Start, keys.EditTime, keys.EditFocus, keys.EditBreak, keys.Stop, keys.Back, keys.Help}
 	} else {
 		title := phaseStyle.Render(strings.ToUpper(p.phaseName())) +

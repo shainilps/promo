@@ -6,15 +6,15 @@ its pretty easy to build this thing. just build your own. works only on linux du
 
 ```
 promo                 open the menu
-promo 25m             start a timer right away (quits when done)
+promo 25m             start a timer right away (quits when you silence it)
 promo pomodoro        start a pomodoro right away
 promo alarm 07:30     set an alarm right away (7:30pm works too)
 ```
 
 modes:
 
-- **pomodoro**: focus → break → focus … focus starts right away. when a phase ends it plays the sound, sends a notification and waits for `enter` before starting the next one. `e` edits the running/next phase length, `f`/`b` edit focus/break.
-- **timer**: plain countdown. `e` edits its length.
+- **pomodoro**: focus → break → focus … press `space` to start the first focus. when a phase ends the sound loops (any key silences it), a notification is sent, and it waits for `space` before starting the next one. `e` edits the running/next phase length, `f`/`b` edit focus/break.
+- **timer**: plain countdown, rings until you press a key. `e` edits its length.
 - **alarm**: pick a time, watch it count down. when it rings the sound loops until `enter`/`space`, `s` snoozes.
 - **settings**: edit the config from the tui, vim style (`j`/`k` move, `i` edit, `esc` normal mode, `space` toggle, `w` save).
 

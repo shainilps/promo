@@ -35,7 +35,8 @@ type app struct {
 	help          help.Model
 	width, height int
 	screen        screen
-	oneShot       bool // launched via a CLI shortcut: quit when that mode finishes
+	oneShot       bool       // launched via a CLI shortcut: quit when that mode finishes
+	ringing       *soundLoop // pomodoro/timer end sound, looping until a key is pressed
 	warning       string
 
 	editor   lengthEditor
@@ -67,6 +68,21 @@ func (a *app) toMenu() {
 
 func (a *app) shutdown() {
 	a.alarm.loop.Stop()
+	a.stopRing()
+}
+
+// ring loops the end-of-phase sound until any key is pressed, and brings
+// the finished screen to the front.
+func (a *app) ring(s screen) {
+	a.stopRing()
+	a.ringing = startSoundLoop(a.cfg.soundFor(false))
+	a.editor.active = false
+	a.screen = s
+}
+
+func (a *app) stopRing() {
+	a.ringing.Stop()
+	a.ringing = nil
 }
 
 func (a *app) Init() tea.Cmd { return tick() }
@@ -84,6 +100,11 @@ func (a *app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if key.Matches(msg, keys.ForceQuit) {
 			a.shutdown()
 			return a, tea.Quit
+		}
+		// Any key silences a ringing pomodoro/timer, then still does its job
+		// (enter/space starts the next phase).
+		if a.ringing != nil {
+			a.stopRing()
 		}
 		if a.editor.active {
 			return a, a.editor.update(msg)
@@ -178,4 +199,12 @@ func (a *app) progress(percent float64, grad *[2]string) string {
 
 func blinkOn() bool {
 	return time.Now().UnixMilli()/500%2 == 0
+}
+
+func ringingHint(color lipgloss.TerminalColor) string {
+	style := lipgloss.NewStyle().Bold(true).Foreground(color)
+	if !blinkOn() {
+		style = style.Faint(true)
+	}
+	return style.Render("ringing · any key to silence")
 }

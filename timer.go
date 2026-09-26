@@ -23,12 +23,8 @@ func (t *timerModel) tick(a *app) tea.Cmd {
 		return nil
 	}
 	t.done = true
-	playOnce(a.cfg.soundFor(false))
+	a.ring(screenTimer)
 	notify(a.cfg, "Time's up", "Your "+shortDuration(t.cd.total)+" timer finished.", "normal")
-	if a.oneShot && a.screen == screenTimer {
-		a.shutdown()
-		return tea.Quit
-	}
 	return nil
 }
 
@@ -38,8 +34,12 @@ func (t *timerModel) update(a *app, msg tea.KeyMsg) tea.Cmd {
 			t.begin(t.cd.total)
 			return nil
 		}
-		if key.Matches(msg, keys.Back, keys.Start, keys.Stop) {
+		if key.Matches(msg, keys.Back, keys.Start, keys.Pause, keys.Stop) {
 			t.active = false
+			if a.oneShot {
+				a.shutdown()
+				return tea.Quit
+			}
 			a.toMenu()
 		}
 		return nil
@@ -80,6 +80,9 @@ func (t *timerModel) view(a *app) string {
 			"",
 			st.muted.Render(shortDuration(t.cd.total)+" timer finished"),
 		)
+		if a.ringing != nil {
+			body = lipgloss.JoinVertical(lipgloss.Center, body, "", ringingHint(color))
+		}
 		return a.frame(body, color, helpKeys{keys.Start, keys.Restart, keys.Back})
 	}
 
