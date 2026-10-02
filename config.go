@@ -16,6 +16,8 @@ const fallbackSound = "/usr/share/sounds/freedesktop/stereo/alarm-clock-elapsed.
 
 type Config struct {
 	SoundPath     string         `yaml:"sound_path"`
+	TasksDir      string         `yaml:"tasks_dir"`
+	OverdueNag    string         `yaml:"overdue_nag"`
 	DefaultTime   string         `yaml:"default_time"`
 	Notifications bool           `yaml:"notifications"`
 	Pomodoro      PomodoroConfig `yaml:"pomodoro"`
@@ -46,6 +48,8 @@ type UIConfig struct {
 func defaultConfig() Config {
 	return Config{
 		DefaultTime:   "30m",
+		TasksDir:      "~/.local/share/gg/tasks",
+		OverdueNag:    "1h",
 		Notifications: true,
 		Pomodoro:      PomodoroConfig{Work: "25m", Break: "10m"},
 		Alarm:         AlarmConfig{Snooze: "5m"},
@@ -66,7 +70,12 @@ func configPath() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(home, ".config", "promo", "config.yaml"), nil
+	dir := filepath.Join(home, ".config", "gg")
+	// This tool used to be called promo; carry its config over once.
+	if _, err := os.Stat(dir); os.IsNotExist(err) {
+		os.Rename(filepath.Join(home, ".config", "promo"), dir)
+	}
+	return filepath.Join(dir, "config.yaml"), nil
 }
 
 // loadConfig reads the config file over the defaults, so keys missing from
@@ -97,12 +106,17 @@ func saveConfig(path string, cfg Config) error {
 	if err := enc.Encode(cfg); err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".config-*.yaml")
+	return writeFileAtomic(path, buf.Bytes())
+}
+
+// writeFileAtomic replaces path in one step, so readers never see half a file.
+func writeFileAtomic(path string, data []byte) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+"-*")
 	if err != nil {
 		return err
 	}
 	defer os.Remove(tmp.Name())
-	if _, err := tmp.Write(buf.Bytes()); err != nil {
+	if _, err := tmp.Write(data); err != nil {
 		tmp.Close()
 		return err
 	}
@@ -126,6 +140,13 @@ func (c *Config) normalize() []string {
 			warnings = append(warnings, fmt.Sprintf("invalid %s %q, using %s", name, *v, d))
 			*v = d
 		}
+	}
+	if strings.TrimSpace(c.TasksDir) == "" {
+		c.TasksDir = def.TasksDir
+	}
+	if validateNag(c.OverdueNag) != nil {
+		warnings = append(warnings, fmt.Sprintf("invalid overdue_nag %q, using %s", c.OverdueNag, def.OverdueNag))
+		c.OverdueNag = def.OverdueNag
 	}
 	fixDur("default_time", &c.DefaultTime, def.DefaultTime)
 	fixDur("pomodoro.work", &c.Pomodoro.Work, def.Pomodoro.Work)
@@ -202,6 +223,36 @@ func validateBarWidth(s string) error {
 	}
 	if n < 10 || n > 200 {
 		return fmt.Errorf("must be between 10 and 200")
+	}
+	return nil
+}
+
+// nagEvery is how often to nudge about overdue tasks; false means never.
+func (c Config) nagEvery() (time.Duration, bool) {
+	d, err := time.ParseDuration(strings.TrimSpace(c.OverdueNag))
+	return d, err == nil && d > 0
+}
+
+func validateNag(s string) error {
+	if strings.TrimSpace(s) == "off" {
+		return nil
+	}
+	if err := validateDuration(s); err != nil {
+		return fmt.Errorf("%v, or off", err)
+	}
+	if dur(strings.TrimSpace(s)) < time.Minute {
+		return fmt.Errorf("at least 1m, or off")
+	}
+	return nil
+}
+
+func validateDir(s string) error {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return fmt.Errorf("can't be empty")
+	}
+	if info, err := os.Stat(expandHome(s)); err == nil && !info.IsDir() {
+		return fmt.Errorf("is a file, not a folder")
 	}
 	return nil
 }

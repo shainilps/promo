@@ -11,6 +11,7 @@ var (
 	colorFocus = lipgloss.Color("#F38BA8") // red
 	colorBreak = lipgloss.Color("#A6E3A1") // green
 	colorAlarm = lipgloss.Color("#FAB387") // peach
+	colorTask  = lipgloss.Color("#89B4FA") // blue
 	colorMuted = lipgloss.Color("#7F849C") // overlay1
 	colorText  = lipgloss.Color("#CDD6F4") // text
 	colorError = lipgloss.Color("#EBA0AC") // maroon

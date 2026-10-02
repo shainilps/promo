@@ -1,4 +1,4 @@
-module github.com/shainilps/promo
+module github.com/shainilps/gg
 
 go 1.25.2
 

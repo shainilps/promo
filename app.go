@@ -19,6 +19,8 @@ const (
 	screenAlarmSet
 	screenAlarms
 	screenAlarm
+	screenTasks
+	screenTaskAdd
 	screenSettings
 )
 
@@ -60,6 +62,7 @@ type app struct {
 	editor   lengthEditor
 	menu     menuModel
 	alarm    alarmUI
+	tasks    tasksUI
 	settings settingsModel
 }
 
@@ -86,7 +89,7 @@ func (a *app) toMenu() {
 func (a *app) send(r request) {
 	s, err := call(r)
 	if err != nil {
-		a.err = errors.New("lost connection to the promo daemon")
+		a.err = errors.New("lost connection to the gg daemon")
 		return
 	}
 	a.setState(s)
@@ -133,8 +136,15 @@ func (a *app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.setState(State(msg))
 		return a, waitState(a.updates)
 
+	case listEditedMsg:
+		a.send(request{Op: "tasks.reload"})
+		if a.err != nil {
+			return a, tea.Quit
+		}
+		return a, nil
+
 	case lostMsg:
-		a.err = errors.New("the promo daemon stopped")
+		a.err = errors.New("the gg daemon stopped")
 		return a, tea.Quit
 
 	case tea.KeyMsg:
@@ -159,7 +169,7 @@ func (a *app) handleKey(msg tea.KeyMsg) tea.Cmd {
 	if a.editor.active {
 		return a.editor.update(msg)
 	}
-	typing := a.screen == screenSettings && a.settings.mode == modeInsert
+	typing := a.screen == screenTaskAdd || (a.screen == screenSettings && a.settings.mode == modeInsert)
 	if !typing && key.Matches(msg, keys.Help) {
 		a.help.ShowAll = !a.help.ShowAll
 		return nil
@@ -177,6 +187,10 @@ func (a *app) handleKey(msg tea.KeyMsg) tea.Cmd {
 		return a.alarm.updateList(a, msg)
 	case screenAlarm:
 		return a.alarm.update(a, msg)
+	case screenTasks:
+		return a.tasks.update(a, msg)
+	case screenTaskAdd:
+		return a.tasks.updateForm(a, msg)
 	case screenSettings:
 		return a.settings.update(a, msg)
 	}
@@ -198,6 +212,10 @@ func (a *app) View() string {
 		return a.alarm.viewList(a)
 	case screenAlarm:
 		return a.alarm.view(a)
+	case screenTasks:
+		return a.tasks.view(a)
+	case screenTaskAdd:
+		return a.tasks.viewForm(a)
 	case screenSettings:
 		return a.settings.view(a)
 	default:

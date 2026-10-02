@@ -13,6 +13,8 @@ var keys = struct {
 	FieldLeft, FieldRight, Inc, Dec, Inc10, Dec10, SetAlarm           key.Binding
 	AlarmBack, Cancel, Dismiss, Snooze, NewAlarm                      key.Binding
 	Edit, Toggle, Save, Undo, Leave, Commit, Discard, Accept          key.Binding
+	ListNext, ListPrev, Check, AddTask, DelTask, ClearDone, NextField key.Binding
+	PrevField, AddToList, EditTask, OpenFile                          key.Binding
 }{
 	ForceQuit: bind([]string{"ctrl+c"}, "ctrl+c", "quit"),
 	Quit:      bind([]string{"q"}, "q", "quit"),
@@ -56,6 +58,18 @@ var keys = struct {
 	Commit:  bind([]string{"enter"}, "enter", "apply"),
 	Discard: bind([]string{"n", "d"}, "n", "discard"),
 	Accept:  bind([]string{"y", "w"}, "y", "save"),
+
+	ListNext:  bind([]string{"l", "tab", "right"}, "l/tab", "next list"),
+	ListPrev:  bind([]string{"h", "shift+tab", "left"}, "h", "prev list"),
+	Check:     bind([]string{" ", "enter"}, "space", "done"),
+	AddTask:   bind([]string{"a", "n"}, "a", "add"),
+	AddToList: bind([]string{"A"}, "A", "add to other list"),
+	EditTask:  bind([]string{"e"}, "e", "edit"),
+	OpenFile:  bind([]string{"E"}, "E", "edit list file"),
+	DelTask:   bind([]string{"x", "d"}, "x", "delete"),
+	ClearDone: bind([]string{"c"}, "c", "clear done"),
+	NextField: bind([]string{"tab", "down"}, "tab", "next field"),
+	PrevField: bind([]string{"shift+tab", "up"}, "shift+tab", "prev field"),
 }
 
 // helpKeys adapts a list of bindings to help.KeyMap.

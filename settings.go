@@ -62,6 +62,11 @@ var settingsFields = []field{
 	textField("Pomodoro", "Break length", "default break after each session, e.g. 10m", kindText,
 		func(c *Config) *string { return &c.Pomodoro.Break }, validateDuration),
 
+	textField("Tasks", "Tasks folder", "one markdown file per list (created if missing)", kindText,
+		func(c *Config) *string { return &c.TasksDir }, validateDir),
+	textField("Tasks", "Overdue nudge", "notify about unchecked past-due tasks this often, e.g. 30m (off = never)", kindText,
+		func(c *Config) *string { return &c.OverdueNag }, validateNag),
+
 	textField("Alarm", "Alarm sound", "looped while the alarm rings (empty = sound file)", kindText,
 		func(c *Config) *string { return &c.Alarm.SoundPath }, validateSoundPath),
 	textField("Alarm", "Snooze", "how long s snoozes the alarm, e.g. 5m", kindText,

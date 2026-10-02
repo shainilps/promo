@@ -48,6 +48,6 @@ func (s *soundLoop) Stop() {
 
 func notify(cfg Config, title, body, urgency string) {
 	if cfg.Notifications {
-		start("notify-send", "-a", "promo", "-u", urgency, "-i", "alarm-symbolic", title, body)
+		start("notify-send", "-a", "gg", "-u", urgency, "-i", "alarm-symbolic", title, body)
 	}
 }

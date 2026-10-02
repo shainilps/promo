@@ -80,6 +80,34 @@ var menuItems = []menuItem{
 		},
 	},
 	{
+		icon: "□", color: colorTask, title: "Tasks",
+		desc: func(a *app) string {
+			now := time.Now()
+			overdue, left := 0, 0
+			for _, t := range a.state.Todos {
+				switch {
+				case isOverdue(t, now):
+					overdue++
+				case !t.Done && dayOf(t.Due).Equal(dayOf(now)):
+					left++
+				}
+			}
+			switch {
+			case len(a.state.Todos) == 0:
+				return "dated to-dos and reminders"
+			case overdue > 0:
+				return fmt.Sprintf("● %d overdue · %d left today", overdue, left)
+			case left > 0:
+				return fmt.Sprintf("● %d left today", left)
+			}
+			return "nothing left for today"
+		},
+		action: func(a *app) tea.Cmd {
+			a.screen = screenTasks
+			return nil
+		},
+	},
+	{
 		icon: "≡", color: colorMuted, title: "Settings",
 		desc: func(a *app) string { return "durations, sounds, colors" },
 		action: func(a *app) tea.Cmd {
@@ -133,7 +161,7 @@ func (m *menuModel) update(a *app, msg tea.KeyMsg) tea.Cmd {
 	case key.Matches(msg, keys.Select):
 		return menuItems[m.cursor].action(a)
 	default:
-		// 1-5 jump straight to an item.
+		// 1-6 jump straight to an item.
 		if s := msg.String(); len(s) == 1 && s[0] >= '1' && int(s[0]-'1') < n {
 			m.cursor = int(s[0] - '1')
 			return menuItems[m.cursor].action(a)
@@ -147,7 +175,7 @@ func (m *menuModel) view(a *app) string {
 	const width = 46
 	now := time.Now()
 	header := lipgloss.JoinHorizontal(lipgloss.Top,
-		lipgloss.NewStyle().Width(width/2).Render(st.title.Render("promo")),
+		lipgloss.NewStyle().Width(width/2).Render(st.title.Render("gg")),
 		lipgloss.NewStyle().Width(width-width/2).Align(lipgloss.Right).Render(st.muted.Render(now.Format("Mon 02 Jan · 15:04"))),
 	)
 

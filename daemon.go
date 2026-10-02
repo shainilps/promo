@@ -4,19 +4,21 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
 )
 
 // One daemon owns every running pomodoro, timer and alarm, and plays the
-// sounds. Each promo session is a client that attaches to it over a unix
+// sounds. Each gg session is a client that attaches to it over a unix
 // socket, so closing a session doesn't stop anything.
 
 const (
@@ -31,6 +33,11 @@ type State struct {
 	Pomo   pomodoro   `json:"pomo"`
 	Timer  timerModel `json:"timer"`
 	Alarms []alarm    `json:"alarms"` // sorted by target time
+
+	Todos    []todo   `json:"todos"`
+	Lists    []string `json:"lists"`     // every list file, including empty ones
+	TasksDir string   `json:"tasks_dir"` // where the list files live
+	TaskErr  string   `json:"task_err,omitempty"`
 }
 
 func (s *State) alarm(id int) *alarm {
@@ -58,13 +65,17 @@ type request struct {
 	Phase pomoPhase     `json:"phase,omitempty"`
 	Dur   time.Duration `json:"dur,omitempty"`
 	At    time.Time     `json:"at"`
+
+	Text   string `json:"text,omitempty"`
+	List   string `json:"list,omitempty"`
+	Remind bool   `json:"remind,omitempty"`
 }
 
 func socketPath() string {
 	if dir := os.Getenv("XDG_RUNTIME_DIR"); dir != "" {
-		return filepath.Join(dir, "promo.sock")
+		return filepath.Join(dir, "gg.sock")
 	}
-	return filepath.Join(os.TempDir(), fmt.Sprintf("promo-%d.sock", os.Getuid()))
+	return filepath.Join(os.TempDir(), fmt.Sprintf("gg-%d.sock", os.Getuid()))
 }
 
 type daemon struct {
@@ -77,20 +88,27 @@ type daemon struct {
 	alarmLoop *soundLoop // loops while any alarm rings
 	ln        net.Listener
 	watchers  map[net.Conn]*json.Encoder
+	tasks     taskStore
+	ticks     int
+	lastNag   time.Time // last overdue nudge (or daemon start)
 }
 
 func runDaemon(cfgPath string, cfg Config) error {
 	sock := socketPath()
 	if c, err := net.Dial("unix", sock); err == nil {
 		c.Close()
-		return errors.New("promo daemon is already running")
+		return errors.New("gg daemon is already running")
 	}
 	os.Remove(sock) // stale socket from a daemon that didn't shut down cleanly
 	ln, err := net.Listen("unix", sock)
 	if err != nil {
 		return err
 	}
-	d := &daemon{cfgPath: cfgPath, cfg: cfg, ln: ln, watchers: map[net.Conn]*json.Encoder{}}
+	d := &daemon{cfgPath: cfgPath, cfg: cfg, ln: ln, watchers: map[net.Conn]*json.Encoder{}, lastNag: time.Now()}
+	if err := d.loadTasks(); err != nil {
+		ln.Close()
+		return fmt.Errorf("reading tasks: %w", err)
+	}
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
@@ -171,6 +189,25 @@ func (d *daemon) tick() {
 	changed := d.st.Pomo.check(d)
 	changed = d.st.Timer.check(d) || changed
 	now := time.Now()
+	// Pick up list files edited by hand every couple of seconds.
+	if d.ticks++; d.ticks%8 == 0 && d.tasks.changedOnDisk() {
+		d.reportTaskErr(d.loadTasks())
+		changed = true
+	}
+	for i := range d.st.Todos {
+		t := &d.st.Todos[i]
+		if !t.Remind || t.Done || t.reminded || now.Before(t.Due) {
+			continue
+		}
+		t.reminded, changed = true, true
+		notify(d.cfg, "Reminder", t.Text+"  ·  "+t.List, "critical")
+		if path := d.cfg.soundFor(false); path != "" {
+			start("pw-play", path)
+		}
+	}
+	if every, ok := d.cfg.nagEvery(); ok && now.Sub(d.lastNag) >= every {
+		d.nagOverdue(now)
+	}
 	for i := range d.st.Alarms {
 		al := &d.st.Alarms[i]
 		if al.Ringing || now.Before(al.Target) {
@@ -202,7 +239,11 @@ func (d *daemon) apply(r request) {
 	switch r.Op {
 	case "reload":
 		if cfg, _, err := loadConfig(d.cfgPath); err == nil {
+			moved := cfg.TasksDir != d.cfg.TasksDir
 			d.cfg = cfg
+			if moved {
+				d.reportTaskErr(d.loadTasks())
+			}
 		}
 	case "silence":
 		d.stopRing()
@@ -262,8 +303,126 @@ func (d *daemon) apply(r request) {
 			al.Ringing = false
 			al.SetAt, al.Target = time.Now(), time.Now().Add(dur(d.cfg.Alarm.Snooze))
 		}
+
+	case "todo.add":
+		list := cleanList(r.List)
+		d.tasks.nextID++
+		text := strings.Join(strings.Fields(r.Text), " ")
+		d.st.Todos = append(d.st.Todos, todo{ID: d.tasks.nextID, List: list, Text: text, Due: r.At, Remind: r.Remind})
+		d.saveLists(list)
+	case "todo.edit":
+		for i := range d.st.Todos {
+			t := &d.st.Todos[i]
+			if t.ID != r.ID {
+				continue
+			}
+			old := t.List
+			if !t.Due.Equal(r.At) || t.Remind != r.Remind {
+				t.reminded = r.Remind && !r.At.After(time.Now())
+			}
+			t.List, t.Text, t.Due, t.Remind = cleanList(r.List), strings.Join(strings.Fields(r.Text), " "), r.At, r.Remind
+			d.saveLists(old, t.List)
+			break
+		}
+	case "tasks.reload":
+		d.reportTaskErr(d.loadTasks())
+	case "todo.toggle":
+		for i := range d.st.Todos {
+			if t := &d.st.Todos[i]; t.ID == r.ID {
+				t.Done = !t.Done
+				d.saveLists(t.List)
+			}
+		}
+	case "todo.remove":
+		for i, t := range d.st.Todos {
+			if t.ID == r.ID {
+				d.st.Todos = slices.Delete(d.st.Todos, i, i+1)
+				d.saveLists(t.List)
+				break
+			}
+		}
+	case "todo.clear": // drop finished tasks from one list, or every list
+		var touched []string
+		d.st.Todos = slices.DeleteFunc(d.st.Todos, func(t todo) bool {
+			if t.Done && (r.List == "" || t.List == r.List) {
+				touched = append(touched, t.List)
+				return true
+			}
+			return false
+		})
+		slices.Sort(touched)
+		d.saveLists(slices.Compact(touched)...)
 	}
 	slices.SortStableFunc(d.st.Alarms, func(a, b alarm) int { return a.Target.Compare(b.Target) })
+}
+
+// loadTasks (re)reads every list file. Reminders keep their sent state
+// across reloads, and ones already past when first read don't fire.
+func (d *daemon) loadTasks() error {
+	sent := map[string]bool{}
+	for _, t := range d.st.Todos {
+		sent[t.key()] = t.reminded
+	}
+	d.tasks.dir = expandHome(d.cfg.TasksDir)
+	todos, lists, err := d.tasks.load()
+	if err != nil {
+		return err
+	}
+	now := time.Now()
+	for i := range todos {
+		t := &todos[i]
+		r, known := sent[t.key()]
+		t.reminded = r || (!known && t.Remind && t.Due.Before(now))
+	}
+	d.st.Todos, d.st.Lists, d.st.TasksDir = todos, lists, d.tasks.dir
+	return nil
+}
+
+// nagOverdue sends one notification listing unchecked past-due tasks.
+// Reminders that came due since the last nudge are skipped; they just got
+// their own notification.
+func (d *daemon) nagOverdue(now time.Time) {
+	var late []todo
+	for _, t := range d.st.Todos {
+		if isOverdue(t, now) && t.Due.Before(d.lastNag) {
+			late = append(late, t)
+		}
+	}
+	d.lastNag = now
+	if len(late) == 0 {
+		return
+	}
+	slices.SortStableFunc(late, func(a, b todo) int { return a.Due.Compare(b.Due) })
+	var lines []string
+	for i, t := range late {
+		if i == 5 {
+			lines = append(lines, fmt.Sprintf("+%d more", len(late)-i))
+			break
+		}
+		lines = append(lines, fmt.Sprintf("%s  %s  · %s", overdueWhen(t, now), t.Text, t.List))
+	}
+	title := "1 task still unchecked"
+	if len(late) > 1 {
+		title = fmt.Sprintf("%d tasks still unchecked", len(late))
+	}
+	notify(d.cfg, title, strings.Join(lines, "\n"), "normal")
+}
+
+// saveLists writes the given lists back to their files.
+func (d *daemon) saveLists(lists ...string) {
+	var err error
+	for _, l := range lists {
+		err = errors.Join(err, d.tasks.save(l, d.st.Todos))
+	}
+	d.reportTaskErr(err)
+	d.st.Lists = slices.Sorted(maps.Keys(d.tasks.seen))
+}
+
+func (d *daemon) reportTaskErr(err error) {
+	d.st.TaskErr = ""
+	if err != nil {
+		d.st.TaskErr = err.Error()
+	}
 }
 
 // call sends one request to the daemon and returns the resulting state.
@@ -339,5 +498,5 @@ func ensureDaemon() error {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	return errors.New("daemon did not start (try running `promo daemon` to see why)")
+	return errors.New("daemon did not start (try running `gg daemon` to see why)")
 }
