@@ -10,7 +10,7 @@ import (
 var (
 	colorFocus = lipgloss.Color("#F38BA8") // red
 	colorBreak = lipgloss.Color("#A6E3A1") // green
-	colorAlarm = lipgloss.Color("#FAB387") // peach
+	colorWarn  = lipgloss.Color("#FAB387") // peach
 	colorTask  = lipgloss.Color("#89B4FA") // blue
 	colorMuted = lipgloss.Color("#7F849C") // overlay1
 	colorText  = lipgloss.Color("#CDD6F4") // text
@@ -19,16 +19,14 @@ var (
 	colorTrack = "#45475A"                 // surface1, empty part of bars
 )
 
-// Progress bar gradients per mode; the timer uses the configured one.
+// Progress bar gradients per pomodoro phase.
 var (
 	gradFocus = [2]string{"#F38BA8", "#FAB387"} // red → peach
 	gradBreak = [2]string{"#94E2D5", "#A6E3A1"} // teal → green
-	gradAlarm = [2]string{"#FAB387", "#F9E2AF"} // peach → yellow
 )
 
 type styles struct {
 	accent   lipgloss.Color
-	card     lipgloss.Style
 	title    lipgloss.Style
 	muted    lipgloss.Style
 	text     lipgloss.Style
@@ -44,11 +42,7 @@ type styles struct {
 func newStyles(ui UIConfig) styles {
 	accent := lipgloss.Color(ui.AccentColor)
 	return styles{
-		accent: accent,
-		card: lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(accent).
-			Padding(1, 4),
+		accent:   accent,
 		title:    lipgloss.NewStyle().Bold(true).Foreground(accent),
 		muted:    lipgloss.NewStyle().Foreground(colorMuted),
 		text:     lipgloss.NewStyle().Foreground(colorText),

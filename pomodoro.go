@@ -158,9 +158,9 @@ func (p *pomodoro) update(a *app, msg tea.KeyMsg) tea.Cmd {
 		a.send(request{Op: "pomo.restart"})
 	case key.Matches(msg, keys.Stop):
 		a.send(request{Op: "pomo.stop"})
-		a.toMenu()
+		return tea.Quit
 	case key.Matches(msg, keys.Back):
-		a.toMenu()
+		return tea.Quit // the pomodoro keeps running in the daemon
 	}
 	return nil
 }

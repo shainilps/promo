@@ -1,9 +1,12 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"maps"
 	"net"
 	"os"
@@ -17,45 +20,23 @@ import (
 	"time"
 )
 
-// One daemon owns every running pomodoro, timer and alarm, and plays the
-// sounds. Each gg session is a client that attaches to it over a unix
+// One daemon owns the pomodoro and the task lists, and plays the sounds
+// and sends the reminders. Each gg session is a client that attaches to it over a unix
 // socket, so closing a session doesn't stop anything.
 
-const (
-	ringPomodoro = "pomodoro"
-	ringTimer    = "timer"
-)
+const ringPomodoro = "pomodoro"
 
 // State is everything the daemon runs; clients render it.
 type State struct {
-	Seq    uint64     `json:"seq"`            // bumped on every change, so clients drop stale copies
-	Ring   string     `json:"ring,omitempty"` // pomodoro or timer whose end sound is looping
-	Pomo   pomodoro   `json:"pomo"`
-	Timer  timerModel `json:"timer"`
-	Alarms []alarm    `json:"alarms"` // sorted by target time
+	Build string   `json:"build"`          // which gg binary the daemon runs; see ensureDaemon
+	Seq   uint64   `json:"seq"`            // bumped on every change, so clients drop stale copies
+	Ring  string   `json:"ring,omitempty"` // "pomodoro" while its end sound loops
+	Pomo  pomodoro `json:"pomo"`
 
 	Todos    []todo   `json:"todos"`
 	Lists    []string `json:"lists"`     // every list file, including empty ones
 	TasksDir string   `json:"tasks_dir"` // where the list files live
 	TaskErr  string   `json:"task_err,omitempty"`
-}
-
-func (s *State) alarm(id int) *alarm {
-	for i := range s.Alarms {
-		if s.Alarms[i].ID == id {
-			return &s.Alarms[i]
-		}
-	}
-	return nil
-}
-
-func (s *State) ringingAlarm() *alarm {
-	for i := range s.Alarms {
-		if s.Alarms[i].Ringing {
-			return &s.Alarms[i]
-		}
-	}
-	return nil
 }
 
 // request is one action sent by a client. Only the fields an op needs are set.
@@ -69,6 +50,8 @@ type request struct {
 	Text   string `json:"text,omitempty"`
 	List   string `json:"list,omitempty"`
 	Remind bool   `json:"remind,omitempty"`
+
+	State *State `json:"state,omitempty"` // restore: what the previous daemon was running
 }
 
 func socketPath() string {
@@ -83,14 +66,13 @@ type daemon struct {
 	cfgPath   string
 	cfg       Config
 	st        State
-	nextID    int
-	ring      *soundLoop // pomodoro/timer end sound
-	alarmLoop *soundLoop // loops while any alarm rings
+	ring      *soundLoop // pomodoro end sound
 	ln        net.Listener
 	watchers  map[net.Conn]*json.Encoder
 	tasks     taskStore
 	ticks     int
 	lastNag   time.Time // last overdue nudge (or daemon start)
+	ringSince time.Time // when the pomodoro end sound started
 }
 
 func runDaemon(cfgPath string, cfg Config) error {
@@ -109,6 +91,7 @@ func runDaemon(cfgPath string, cfg Config) error {
 		ln.Close()
 		return fmt.Errorf("reading tasks: %w", err)
 	}
+	d.st.Build = buildID()
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
@@ -131,7 +114,6 @@ func runDaemon(cfgPath string, cfg Config) error {
 	}
 	d.mu.Lock()
 	d.ring.Stop()
-	d.alarmLoop.Stop()
 	d.mu.Unlock()
 	return nil
 }
@@ -167,12 +149,6 @@ func (d *daemon) serve(conn net.Conn) {
 
 // changed publishes the state to every attached session. Callers hold d.mu.
 func (d *daemon) changed() {
-	if d.st.ringingAlarm() == nil {
-		d.alarmLoop.Stop()
-		d.alarmLoop = nil
-	} else if d.alarmLoop == nil {
-		d.alarmLoop = startSoundLoop(d.cfg.soundFor(true))
-	}
 	d.st.Seq++
 	for conn, enc := range d.watchers {
 		conn.SetWriteDeadline(time.Now().Add(time.Second))
@@ -187,7 +163,6 @@ func (d *daemon) tick() {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	changed := d.st.Pomo.check(d)
-	changed = d.st.Timer.check(d) || changed
 	now := time.Now()
 	// Pick up list files edited by hand every couple of seconds.
 	if d.ticks++; d.ticks%8 == 0 && d.tasks.changedOnDisk() {
@@ -201,20 +176,17 @@ func (d *daemon) tick() {
 		}
 		t.reminded, changed = true, true
 		notify(d.cfg, "Reminder", t.Text+"  ·  "+t.List, "critical")
-		if path := d.cfg.soundFor(false); path != "" {
+		if path := d.cfg.soundFor(); path != "" {
 			start("pw-play", path)
 		}
 	}
 	if every, ok := d.cfg.nagEvery(); ok && now.Sub(d.lastNag) >= every {
 		d.nagOverdue(now)
 	}
-	for i := range d.st.Alarms {
-		al := &d.st.Alarms[i]
-		if al.Ringing || now.Before(al.Target) {
-			continue
-		}
-		al.Ringing, changed = true, true
-		notify(d.cfg, "Alarm", "It's "+al.Target.Format("15:04")+".", "critical")
+	// The end sound doesn't ring forever: it goes quiet after ring_for.
+	if limit, ok := d.cfg.ringFor(); ok && d.st.Ring != "" && now.Sub(d.ringSince) >= limit {
+		d.stopRing()
+		changed = true
 	}
 	if changed {
 		d.changed()
@@ -224,8 +196,8 @@ func (d *daemon) tick() {
 // startRing loops the end-of-phase sound until a session silences it.
 func (d *daemon) startRing(kind string) {
 	d.stopRing()
-	d.ring = startSoundLoop(d.cfg.soundFor(false))
-	d.st.Ring = kind
+	d.ring = startSoundLoop(d.cfg.soundFor())
+	d.st.Ring, d.ringSince = kind, time.Now()
 }
 
 func (d *daemon) stopRing() {
@@ -235,7 +207,7 @@ func (d *daemon) stopRing() {
 }
 
 func (d *daemon) apply(r request) {
-	p, t := &d.st.Pomo, &d.st.Timer
+	p := &d.st.Pomo
 	switch r.Op {
 	case "reload":
 		if cfg, _, err := loadConfig(d.cfgPath); err == nil {
@@ -243,6 +215,13 @@ func (d *daemon) apply(r request) {
 			d.cfg = cfg
 			if moved {
 				d.reportTaskErr(d.loadTasks())
+			}
+		}
+	case "restore": // take over from an older daemon that was replaced
+		if old := r.State; old != nil {
+			d.st.Pomo = old.Pomo
+			if old.Ring == ringPomodoro {
+				d.startRing(old.Ring)
 			}
 		}
 	case "silence":
@@ -276,34 +255,6 @@ func (d *daemon) apply(r request) {
 			d.stopRing()
 		}
 
-	case "timer.begin":
-		t.begin(r.Dur)
-		if d.st.Ring == ringTimer {
-			d.stopRing()
-		}
-	case "timer.pause":
-		if t.Active && !t.Done {
-			t.CD.Toggle()
-		}
-	case "timer.len":
-		t.CD.Adjust(r.Dur-t.CD.Total, time.Second)
-	case "timer.stop":
-		t.Active = false
-		if d.st.Ring == ringTimer {
-			d.stopRing()
-		}
-
-	case "alarm.add":
-		d.nextID++
-		d.st.Alarms = append(d.st.Alarms, alarm{ID: d.nextID, SetAt: time.Now(), Target: r.At})
-	case "alarm.remove":
-		d.st.Alarms = slices.DeleteFunc(d.st.Alarms, func(al alarm) bool { return al.ID == r.ID })
-	case "alarm.snooze":
-		if al := d.st.alarm(r.ID); al != nil {
-			al.Ringing = false
-			al.SetAt, al.Target = time.Now(), time.Now().Add(dur(d.cfg.Alarm.Snooze))
-		}
-
 	case "todo.add":
 		list := cleanList(r.List)
 		d.tasks.nextID++
@@ -324,6 +275,10 @@ func (d *daemon) apply(r request) {
 			d.saveLists(old, t.List)
 			break
 		}
+	case "list.remove":
+		list := cleanList(r.List)
+		d.st.Todos = slices.DeleteFunc(d.st.Todos, func(t todo) bool { return t.List == list })
+		d.saveLists(list)
 	case "tasks.reload":
 		d.reportTaskErr(d.loadTasks())
 	case "todo.toggle":
@@ -353,7 +308,6 @@ func (d *daemon) apply(r request) {
 		slices.Sort(touched)
 		d.saveLists(slices.Compact(touched)...)
 	}
-	slices.SortStableFunc(d.st.Alarms, func(a, b alarm) int { return a.Target.Compare(b.Target) })
 }
 
 // loadTasks (re)reads every list file. Reminders keep their sent state
@@ -476,11 +430,51 @@ func daemonRunning() bool {
 	return true
 }
 
-// ensureDaemon starts the daemon in its own session when none is running.
-func ensureDaemon() error {
-	if daemonRunning() {
-		return nil
+// buildID fingerprints the running binary, so a session can tell when the
+// daemon was started from an older build.
+func buildID() string {
+	exe, err := os.Executable()
+	if err != nil {
+		return ""
 	}
+	f, err := os.Open(exe)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	h := sha256.New()
+	io.Copy(h, f)
+	return hex.EncodeToString(h.Sum(nil))[:16]
+}
+
+// ensureDaemon starts the daemon when none is running, and replaces one
+// started from a different build: an old daemon silently ignores requests
+// it doesn't know (like editing a task). What it was running is handed over.
+func ensureDaemon() error {
+	if !daemonRunning() {
+		return startDaemon()
+	}
+	old, err := call(request{Op: "get"})
+	if err != nil || old.Build == buildID() {
+		return err
+	}
+	if _, err := call(request{Op: "stop"}); err != nil {
+		return fmt.Errorf("stopping the old daemon: %w", err)
+	}
+	for i := 0; daemonRunning(); i++ {
+		if i == 100 {
+			return errors.New("the old daemon didn't stop; run `gg stop` and try again")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if err := startDaemon(); err != nil {
+		return err
+	}
+	_, err = call(request{Op: "restore", State: &old})
+	return err
+}
+
+func startDaemon() error {
 	exe, err := os.Executable()
 	if err != nil {
 		return err

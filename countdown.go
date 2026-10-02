@@ -56,7 +56,7 @@ func (c *countdown) Adjust(d, minTotal time.Duration) {
 	}
 }
 
-// formatDuration rounds up to whole seconds so a fresh 25m timer shows 25:00.
+// formatDuration rounds up to whole seconds so a fresh 25m focus shows 25:00.
 func formatDuration(d time.Duration) string {
 	secs := int((max(d, 0) + time.Second - 1) / time.Second)
 	h, m, s := secs/3600, secs/60%60, secs%60

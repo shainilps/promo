@@ -50,10 +50,10 @@ func boolField(section, label, hint string, ptr func(*Config) *bool) field {
 }
 
 var settingsFields = []field{
-	textField("General", "Sound file", "played when a timer or pomodoro phase ends (empty = system sound)", kindText,
+	textField("General", "Sound file", "played when a pomodoro phase ends or a reminder is due (empty = system sound)", kindText,
 		func(c *Config) *string { return &c.SoundPath }, validateSoundPath),
-	textField("General", "Timer length", "length of Timer mode, e.g. 30m", kindText,
-		func(c *Config) *string { return &c.DefaultTime }, validateDuration),
+	textField("General", "Ring for", "a finished pomodoro phase stops ringing after this, e.g. 1m (off = until a key)", kindText,
+		func(c *Config) *string { return &c.RingFor }, validateOff),
 	boolField("General", "Notifications", "desktop notifications via notify-send",
 		func(c *Config) *bool { return &c.Notifications }),
 
@@ -65,19 +65,10 @@ var settingsFields = []field{
 	textField("Tasks", "Tasks folder", "one markdown file per list (created if missing)", kindText,
 		func(c *Config) *string { return &c.TasksDir }, validateDir),
 	textField("Tasks", "Overdue nudge", "notify about unchecked past-due tasks this often, e.g. 30m (off = never)", kindText,
-		func(c *Config) *string { return &c.OverdueNag }, validateNag),
-
-	textField("Alarm", "Alarm sound", "looped while the alarm rings (empty = sound file)", kindText,
-		func(c *Config) *string { return &c.Alarm.SoundPath }, validateSoundPath),
-	textField("Alarm", "Snooze", "how long s snoozes the alarm, e.g. 5m", kindText,
-		func(c *Config) *string { return &c.Alarm.Snooze }, validateDuration),
+		func(c *Config) *string { return &c.OverdueNag }, validateOff),
 
 	textField("Appearance", "Accent color", "titles, borders and selection (hex)", kindColor,
 		func(c *Config) *string { return &c.UI.AccentColor }, validateColor),
-	textField("Appearance", "Bar start", "timer progress bar gradient start (hex)", kindColor,
-		func(c *Config) *string { return &c.UI.BarStartColor }, validateColor),
-	textField("Appearance", "Bar end", "timer progress bar gradient end (hex)", kindColor,
-		func(c *Config) *string { return &c.UI.BarEndColor }, validateColor),
 	{
 		section: "Appearance", label: "Bar width", hint: "maximum progress bar width (10-200)", kind: kindText,
 		get:      func(c *Config) string { return strconv.Itoa(c.UI.BarWidth) },
@@ -135,14 +126,12 @@ func (s *settingsModel) update(a *app, msg tea.KeyMsg) tea.Cmd {
 	case modeConfirm:
 		switch {
 		case key.Matches(msg, keys.Accept):
-			if cmd, ok := s.save(a); ok {
-				a.toMenu()
-				return cmd
+			if _, ok := s.save(a); ok {
+				return tea.Quit
 			}
 			s.mode = modeNormal
 		case key.Matches(msg, keys.Discard):
-			s.draft = a.cfg
-			a.toMenu()
+			return tea.Quit
 		default:
 			s.mode = modeNormal
 		}
@@ -191,11 +180,10 @@ func (s *settingsModel) update(a *app, msg tea.KeyMsg) tea.Cmd {
 			s.setFlash("reverted unsaved changes")
 		}
 	case key.Matches(msg, keys.Back):
-		if s.dirty(a) {
-			s.mode = modeConfirm
-		} else {
-			a.toMenu()
+		if !s.dirty(a) {
+			return tea.Quit
 		}
+		s.mode = modeConfirm
 	}
 	return nil
 }
@@ -294,14 +282,16 @@ func (s *settingsModel) view(a *app) string {
 		path = "~" + strings.TrimPrefix(path, home)
 	}
 
-	rows := []string{
-		st.title.Render("SETTINGS") + "  " + st.muted.Render(path),
-	}
+	var fields []string
+	cursorLine := 0
 	section := ""
 	for i, f := range settingsFields {
 		if f.section != section {
 			section = f.section
-			rows = append(rows, st.section.Render(strings.ToUpper(section)))
+			fields = append(fields, "", st.section.UnsetMarginTop().Render(strings.ToUpper(section)))
+		}
+		if i == s.cursor {
+			cursorLine = len(fields)
 		}
 		selected := i == s.cursor
 		marker, label := "  ", st.text.Render(f.label)
@@ -312,12 +302,19 @@ func (s *settingsModel) view(a *app) string {
 		if f.get(&s.draft) != f.get(&saved) {
 			changed = st.selected.Render("●")
 		}
-		rows = append(rows, marker+
+		fields = append(fields, marker+
 			lipgloss.NewStyle().Width(labelWidth).Render(label)+
 			lipgloss.NewStyle().Width(valueWidth+2).Render(s.renderValue(a, f, selected))+
 			changed)
 	}
 
+	// Scroll the fields when the terminal is too short for all of them:
+	// 13 lines go to the header, title, hint, status and help.
+	height := 0
+	if a.height > 0 {
+		height = a.height - 13
+	}
+	rows := append([]string{st.title.Render("SETTINGS") + "  " + st.muted.Render(path)}, scrollLines(st, fields, cursorLine, height)...)
 	rows = append(rows, "", st.muted.Render(settingsFields[s.cursor].hint), "")
 
 	var status string
@@ -327,8 +324,8 @@ func (s *settingsModel) view(a *app) string {
 		status = st.mode.Background(colorBreak).Render("INSERT")
 		hk = helpKeys{keys.Commit, keys.Leave}
 	case modeConfirm:
-		status = st.mode.Background(colorAlarm).Render("UNSAVED") + " " +
-			lipgloss.NewStyle().Foreground(colorAlarm).Render("save changes?  y save · n discard · esc stay")
+		status = st.mode.Background(colorWarn).Render("UNSAVED") + " " +
+			lipgloss.NewStyle().Foreground(colorWarn).Render("save changes?  y save · n discard · esc stay")
 		hk = helpKeys{keys.Accept, keys.Discard}
 	default:
 		status = st.mode.Render("NORMAL")

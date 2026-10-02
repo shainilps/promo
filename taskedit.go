@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-// gg task add [list] with no text opens $EDITOR on a draft in the same
+// gg add [list] with no text opens $EDITOR on a draft in the same
 // markdown format as the list files, so several tasks can be written at once.
 
 const draftHelp = `<!--

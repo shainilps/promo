@@ -75,7 +75,18 @@ func cleanList(s string) string {
 	return s
 }
 
-// parseDay reads today, tomorrow, 9/10/2029 or 9/10 (this year), plus the
+// parseClock accepts 07:30, 7:30, 19:05, 7pm, 7:30pm and 7:30 PM.
+func parseClock(s string) (hour, minute int, err error) {
+	s = strings.ToLower(strings.ReplaceAll(strings.TrimSpace(s), " ", ""))
+	for _, layout := range []string{"15:04", "3:04pm", "3pm", "15"} {
+		if t, err := time.Parse(layout, s); err == nil {
+			return t.Hour(), t.Minute(), nil
+		}
+	}
+	return 0, 0, fmt.Errorf("invalid time %q (try 07:30 or 7:30pm)", s)
+}
+
+// parseDay reads today, tomorrow, yesterday, 9/10/2029 or 9/10 (this year), plus the
 // 2026-10-02 form the list files use. Dates are day/month.
 func parseDay(s string, today time.Time) (time.Time, bool) {
 	switch s {
@@ -83,6 +94,8 @@ func parseDay(s string, today time.Time) (time.Time, bool) {
 		return today, true
 	case "tomorrow", "tmr", "tmrw":
 		return today.AddDate(0, 0, 1), true
+	case "yesterday":
+		return today.AddDate(0, 0, -1), true
 	}
 	if t, err := time.ParseInLocation("2/1/2006", s, time.Local); err == nil {
 		return t, true
@@ -238,6 +251,8 @@ func dayTitle(day, today time.Time) string {
 		name, date = "TODAY", day.Format("Mon ")+date
 	case day.Equal(today.AddDate(0, 0, 1)):
 		name, date = "TOMORROW", day.Format("Mon ")+date
+	case day.Equal(today.AddDate(0, 0, -1)):
+		name, date = "YESTERDAY", day.Format("Mon ")+date
 	}
 	return name + " · " + date
 }

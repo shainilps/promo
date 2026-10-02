@@ -18,10 +18,9 @@ type Config struct {
 	SoundPath     string         `yaml:"sound_path"`
 	TasksDir      string         `yaml:"tasks_dir"`
 	OverdueNag    string         `yaml:"overdue_nag"`
-	DefaultTime   string         `yaml:"default_time"`
+	RingFor       string         `yaml:"ring_for"`
 	Notifications bool           `yaml:"notifications"`
 	Pomodoro      PomodoroConfig `yaml:"pomodoro"`
-	Alarm         AlarmConfig    `yaml:"alarm"`
 	UI            UIConfig       `yaml:"ui"`
 }
 
@@ -30,37 +29,27 @@ type PomodoroConfig struct {
 	Break string `yaml:"break"`
 }
 
-type AlarmConfig struct {
-	SoundPath string `yaml:"sound_path"`
-	Snooze    string `yaml:"snooze"`
-}
-
 type UIConfig struct {
-	AccentColor   string `yaml:"accent_color"`
-	BarStartColor string `yaml:"bar_start_color"`
-	BarEndColor   string `yaml:"bar_end_color"`
-	BarWidth      int    `yaml:"bar_width"`
-	BigClock      bool   `yaml:"big_clock"`
-	Fullscreen    bool   `yaml:"fullscreen"`
-	ShowHelp      bool   `yaml:"show_help"`
+	AccentColor string `yaml:"accent_color"`
+	BarWidth    int    `yaml:"bar_width"`
+	BigClock    bool   `yaml:"big_clock"`
+	Fullscreen  bool   `yaml:"fullscreen"`
+	ShowHelp    bool   `yaml:"show_help"`
 }
 
 func defaultConfig() Config {
 	return Config{
-		DefaultTime:   "30m",
 		TasksDir:      "~/.local/share/gg/tasks",
 		OverdueNag:    "1h",
+		RingFor:       "1m",
 		Notifications: true,
 		Pomodoro:      PomodoroConfig{Work: "25m", Break: "10m"},
-		Alarm:         AlarmConfig{Snooze: "5m"},
 		UI: UIConfig{
-			AccentColor:   "#CBA6F7", // mauve
-			BarStartColor: "#89B4FA", // blue
-			BarEndColor:   "#CBA6F7",
-			BarWidth:      60,
-			BigClock:      true,
-			Fullscreen:    true,
-			ShowHelp:      true,
+			AccentColor: "#CBA6F7", // mauve
+			BarWidth:    60,
+			BigClock:    true,
+			Fullscreen:  true,
+			ShowHelp:    true,
 		},
 	}
 }
@@ -144,17 +133,17 @@ func (c *Config) normalize() []string {
 	if strings.TrimSpace(c.TasksDir) == "" {
 		c.TasksDir = def.TasksDir
 	}
-	if validateNag(c.OverdueNag) != nil {
-		warnings = append(warnings, fmt.Sprintf("invalid overdue_nag %q, using %s", c.OverdueNag, def.OverdueNag))
-		c.OverdueNag = def.OverdueNag
+	fixOff := func(name string, v *string, d string) {
+		if validateOff(*v) != nil {
+			warnings = append(warnings, fmt.Sprintf("invalid %s %q, using %s", name, *v, d))
+			*v = d
+		}
 	}
-	fixDur("default_time", &c.DefaultTime, def.DefaultTime)
+	fixOff("overdue_nag", &c.OverdueNag, def.OverdueNag)
+	fixOff("ring_for", &c.RingFor, def.RingFor)
 	fixDur("pomodoro.work", &c.Pomodoro.Work, def.Pomodoro.Work)
 	fixDur("pomodoro.break", &c.Pomodoro.Break, def.Pomodoro.Break)
-	fixDur("alarm.snooze", &c.Alarm.Snooze, def.Alarm.Snooze)
 	fixColor("ui.accent_color", &c.UI.AccentColor, def.UI.AccentColor)
-	fixColor("ui.bar_start_color", &c.UI.BarStartColor, def.UI.BarStartColor)
-	fixColor("ui.bar_end_color", &c.UI.BarEndColor, def.UI.BarEndColor)
 	if validateBarWidth(fmt.Sprint(c.UI.BarWidth)) != nil {
 		warnings = append(warnings, fmt.Sprintf("invalid ui.bar_width %d, using %d", c.UI.BarWidth, def.UI.BarWidth))
 		c.UI.BarWidth = def.UI.BarWidth
@@ -177,14 +166,10 @@ func expandHome(p string) string {
 	return p
 }
 
-// soundFor picks the sound to play, falling back to the general sound and
-// then the freedesktop alarm sound when a path is unset or missing.
-func (c Config) soundFor(alarm bool) string {
-	candidates := []string{c.SoundPath, fallbackSound}
-	if alarm {
-		candidates = append([]string{c.Alarm.SoundPath}, candidates...)
-	}
-	for _, p := range candidates {
+// soundFor picks the sound to play: the configured one, or the
+// freedesktop alarm sound when it is unset or missing.
+func (c Config) soundFor() string {
+	for _, p := range []string{c.SoundPath, fallbackSound} {
 		if p == "" {
 			continue
 		}
@@ -227,13 +212,20 @@ func validateBarWidth(s string) error {
 	return nil
 }
 
-// nagEvery is how often to nudge about overdue tasks; false means never.
-func (c Config) nagEvery() (time.Duration, bool) {
-	d, err := time.ParseDuration(strings.TrimSpace(c.OverdueNag))
+// offDur reads a duration setting that can also be "off" (false).
+func offDur(s string) (time.Duration, bool) {
+	d, err := time.ParseDuration(strings.TrimSpace(s))
 	return d, err == nil && d > 0
 }
 
-func validateNag(s string) error {
+// nagEvery is how often to nudge about overdue tasks; false means never.
+func (c Config) nagEvery() (time.Duration, bool) { return offDur(c.OverdueNag) }
+
+// ringFor is how long the pomodoro end sound rings; false means until stopped.
+func (c Config) ringFor() (time.Duration, bool) { return offDur(c.RingFor) }
+
+// validateOff accepts "off" or a duration of at least a minute.
+func validateOff(s string) error {
 	if strings.TrimSpace(s) == "off" {
 		return nil
 	}

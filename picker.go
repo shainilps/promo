@@ -118,7 +118,7 @@ func (p clockPicker) view(a *app, color lipgloss.TerminalColor, labels [2]string
 
 var pickerHelp = helpKeys{keys.FieldLeft, keys.FieldRight, keys.Inc, keys.Dec, keys.Inc10, keys.Dec10}
 
-// lengthEditor is a full-screen picker for changing a timer or phase length.
+// lengthEditor is a full-screen picker for changing a pomodoro phase length.
 type lengthEditor struct {
 	active bool
 	title  string
@@ -143,7 +143,7 @@ func (a *app) editLength(title, note string, color lipgloss.TerminalColor, curre
 
 func (e *lengthEditor) update(msg tea.KeyMsg) tea.Cmd {
 	switch {
-	case key.Matches(msg, keys.Leave, keys.AlarmBack):
+	case key.Matches(msg, keys.Leave, keys.Back):
 		e.active = false
 	case key.Matches(msg, keys.Commit):
 		d := e.picker.duration()

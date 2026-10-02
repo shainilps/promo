@@ -1,7 +1,9 @@
 package main
 
 import (
+	"cmp"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/charmbracelet/bubbles/help"
@@ -13,13 +15,8 @@ import (
 type screen int
 
 const (
-	screenMenu screen = iota
+	screenTasks screen = iota
 	screenPomodoro
-	screenTimer
-	screenAlarmSet
-	screenAlarms
-	screenAlarm
-	screenTasks
 	screenTaskAdd
 	screenSettings
 )
@@ -52,7 +49,6 @@ type app struct {
 	help          help.Model
 	width, height int
 	screen        screen
-	oneShot       bool // launched via a CLI shortcut: quit when that mode finishes
 	warning       string
 
 	state   State        // latest copy from the daemon
@@ -60,8 +56,6 @@ type app struct {
 	err     error        // lost the daemon; quit and report it
 
 	editor   lengthEditor
-	menu     menuModel
-	alarm    alarmUI
 	tasks    tasksUI
 	settings settingsModel
 }
@@ -80,11 +74,6 @@ func (a *app) applyConfig(cfg Config) {
 	a.help.ShowAll = showAll
 }
 
-func (a *app) toMenu() {
-	a.screen = screenMenu
-	a.oneShot = false
-}
-
 // send runs a request on the daemon and takes the state it returns.
 func (a *app) send(r request) {
 	s, err := call(r)
@@ -95,29 +84,10 @@ func (a *app) send(r request) {
 	a.setState(s)
 }
 
-// setState takes a newer state and brings whatever just started ringing to
-// the front.
+// setState takes a newer state from the daemon, dropping stale ones.
 func (a *app) setState(s State) {
-	if s.Seq < a.state.Seq {
-		return
-	}
-	old := a.state
-	a.state = s
-	if s.Ring != "" && s.Ring != old.Ring {
-		a.editor.active = false
-		a.screen = screenTimer
-		if s.Ring == ringPomodoro {
-			a.screen = screenPomodoro
-		}
-	}
-	for _, al := range s.Alarms {
-		if prev := old.alarm(al.ID); al.Ringing && (prev == nil || !prev.Ringing) {
-			a.editor.active = false
-			a.alarm.show(a, al.ID)
-		}
-	}
-	if a.screen == screenAlarm && s.alarm(a.alarm.sel) == nil {
-		a.alarm.leave(a)
+	if s.Seq >= a.state.Seq {
+		a.state = s
 	}
 }
 
@@ -144,7 +114,7 @@ func (a *app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case lostMsg:
-		a.err = errors.New("the gg daemon stopped")
+		a.err = errors.New("the gg daemon stopped (gg stop, or a newer gg replaced it; just run gg again)")
 		return a, tea.Quit
 
 	case tea.KeyMsg:
@@ -161,7 +131,7 @@ func (a *app) handleKey(msg tea.KeyMsg) tea.Cmd {
 	if key.Matches(msg, keys.ForceQuit) {
 		return tea.Quit
 	}
-	// Any key silences a ringing pomodoro/timer, then still does its job
+	// Any key silences a ringing pomodoro, then still does its job
 	// (enter/space starts the next phase).
 	if a.state.Ring != "" {
 		a.send(request{Op: "silence"})
@@ -175,18 +145,8 @@ func (a *app) handleKey(msg tea.KeyMsg) tea.Cmd {
 		return nil
 	}
 	switch a.screen {
-	case screenMenu:
-		return a.menu.update(a, msg)
 	case screenPomodoro:
 		return a.state.Pomo.update(a, msg)
-	case screenTimer:
-		return a.state.Timer.update(a, msg)
-	case screenAlarmSet:
-		return a.alarm.updateSetter(a, msg)
-	case screenAlarms:
-		return a.alarm.updateList(a, msg)
-	case screenAlarm:
-		return a.alarm.update(a, msg)
 	case screenTasks:
 		return a.tasks.update(a, msg)
 	case screenTaskAdd:
@@ -204,41 +164,68 @@ func (a *app) View() string {
 	switch a.screen {
 	case screenPomodoro:
 		return a.state.Pomo.view(a)
-	case screenTimer:
-		return a.state.Timer.view(a)
-	case screenAlarmSet:
-		return a.alarm.viewSetter(a)
-	case screenAlarms:
-		return a.alarm.viewList(a)
-	case screenAlarm:
-		return a.alarm.view(a)
-	case screenTasks:
-		return a.tasks.view(a)
-	case screenTaskAdd:
-		return a.tasks.viewForm(a)
 	case screenSettings:
 		return a.settings.view(a)
-	default:
-		return a.menu.view(a)
+	default: // the tasks and the add/edit panel
+		return a.tasks.view(a)
 	}
 }
 
-// frame wraps a screen body in a bordered card with the help footer and
-// centers it in the window.
-func (a *app) frame(body string, border lipgloss.TerminalColor, hk helpKeys) string {
-	parts := []string{a.st.card.BorderForeground(border).Render(body)}
+var screenNames = map[screen]string{
+	screenPomodoro: "pomodoro",
+	screenTasks:    "tasks",
+	screenTaskAdd:  "tasks",
+	screenSettings: "settings",
+}
+
+// header is the bar across the top of every screen: where you are on the
+// left, the date on the right, and a rule under it.
+func (a *app) header(color lipgloss.TerminalColor) []string {
+	w := cmp.Or(a.width, 80)
+	left := " " + lipgloss.NewStyle().Bold(true).Foreground(color).Render("gg")
+	if name := screenNames[a.screen]; name != "" {
+		left += a.st.muted.Render(" · " + name)
+	}
+	right := a.st.muted.Render(time.Now().Format("Mon 02 Jan · 15:04")) + " "
+	if ring := a.ringingNote(); ring != "" {
+		badge := a.st.badge.Background(colorWarn)
+		if !blinkOn() {
+			badge = badge.Faint(true)
+		}
+		right = badge.Render(ring) + "  " + right
+	}
+	return []string{spread(left, right, w), a.st.muted.Render(strings.Repeat("─", w))}
+}
+
+// ringingNote flags a ringing pomodoro in the header of other screens.
+func (a *app) ringingNote() string {
+	if a.state.Ring != "" && a.screen != screenPomodoro {
+		return "POMODORO RINGING · any key silences"
+	}
+	return ""
+}
+
+// frame lays a screen out over the whole terminal: the header bar, the body
+// against the left edge, and the key help pinned to the bottom.
+func (a *app) frame(body string, color lipgloss.TerminalColor, hk helpKeys) string {
+	w := cmp.Or(a.width, 80)
+	top := a.header(color)
+	body = lipgloss.NewStyle().Padding(1, 2, 0).Render(body)
+	var bottom []string
 	if a.cfg.UI.ShowHelp {
-		a.help.Width = a.width
-		parts = append(parts, "", a.help.View(hk))
+		a.help.Width = w - 2
+		bottom = []string{a.st.muted.Render(strings.Repeat("─", w)), lipgloss.NewStyle().PaddingLeft(1).Render(a.help.View(hk))}
 	}
-	out := lipgloss.JoinVertical(lipgloss.Center, parts...)
-	if a.width == 0 {
-		return out
+	if a.height > 0 {
+		// Fill down to the help, or cut the body so header and help stay visible.
+		room := a.height - len(top) - lipgloss.Height(strings.Join(bottom, "\n"))
+		if lines := strings.Split(body, "\n"); len(lines) > room {
+			body = strings.Join(lines[:max(room, 1)], "\n")
+		} else if a.cfg.UI.Fullscreen {
+			body += strings.Repeat("\n", room-len(lines))
+		}
 	}
-	if !a.cfg.UI.Fullscreen {
-		return lipgloss.PlaceHorizontal(a.width, lipgloss.Center, out)
-	}
-	return lipgloss.Place(a.width, a.height, lipgloss.Center, lipgloss.Center, out)
+	return strings.Join(append(append(top, body), bottom...), "\n")
 }
 
 // clock renders a duration in big block digits, or plain text when disabled
@@ -255,12 +242,9 @@ func (a *app) bigOrPlain(s string, color lipgloss.TerminalColor) string {
 	return style.Render(s)
 }
 
-// progress draws a bar in the given gradient; nil uses the configured one.
+// progress draws a bar in the given gradient.
 func (a *app) progress(percent float64, grad *[2]string) string {
-	from, to := a.cfg.UI.BarStartColor, a.cfg.UI.BarEndColor
-	if grad != nil {
-		from, to = grad[0], grad[1]
-	}
+	from, to := grad[0], grad[1]
 	w := a.cfg.UI.BarWidth
 	if a.width > 0 {
 		w = min(w, a.width-14)

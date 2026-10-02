@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -24,6 +25,9 @@ type tasksUI struct {
 	list   string // selected list, "" = all of them
 	cursor int    // index into visible()
 	form   taskForm
+	ask    string // y/n question in the status bar
+	onYes  func() // what y does for ask
+	flash  string // one-off note in the status bar
 }
 
 type taskForm struct {
@@ -40,7 +44,7 @@ type listEditedMsg struct{}
 
 var formLabels = [3]string{"task", "list", "when"}
 
-// lists is the tab row: all, then every list file.
+// lists is the sidebar: all, then every list file.
 func (u *tasksUI) lists(a *app) []string {
 	return append([]string{""}, a.state.Lists...)
 }
@@ -75,6 +79,14 @@ func (u *tasksUI) focusTask(a *app, id int) {
 }
 
 func (u *tasksUI) update(a *app, msg tea.KeyMsg) tea.Cmd {
+	if yes := u.onYes; yes != nil {
+		u.ask, u.onYes = "", nil
+		if msg.String() == "y" {
+			yes()
+		}
+		return nil
+	}
+	u.flash = ""
 	items := u.visible(a)
 	n := len(items)
 	u.cursor = max(min(u.cursor, n-1), 0)
@@ -123,101 +135,38 @@ func (u *tasksUI) update(a *app, msg tea.KeyMsg) tea.Cmd {
 		}
 		path := filepath.Join(a.state.TasksDir, list+".md")
 		return tea.ExecProcess(editorCmd(path), func(error) tea.Msg { return listEditedMsg{} })
-	case key.Matches(msg, keys.DelTask) && n > 0:
+	case key.Matches(msg, keys.DelTaskNow) && n > 0:
 		a.send(request{Op: "todo.remove", ID: items[u.cursor].ID})
+	case key.Matches(msg, keys.DelTask) && n > 0:
+		t := items[u.cursor]
+		u.ask = fmt.Sprintf("delete %q?", truncateRight(t.Text, 40))
+		u.onYes = func() { a.send(request{Op: "todo.remove", ID: t.ID}) }
+	case key.Matches(msg, keys.DelList):
+		list := u.list
+		if list == "" {
+			u.flash = "select a list first (h/l), then D deletes it"
+			break
+		}
+		n := 0
+		for _, t := range a.state.Todos {
+			n += boolInt(t.List == list)
+		}
+		what := fmt.Sprintf("its %d tasks", n)
+		if n == 1 {
+			what = "its 1 task"
+		}
+		u.ask = fmt.Sprintf("delete list %s and %s?", list, what)
+		u.onYes = func() {
+			a.send(request{Op: "list.remove", List: list})
+			u.list, u.cursor = "", 0
+			u.flash = "deleted list " + list
+		}
 	case key.Matches(msg, keys.ClearDone):
 		a.send(request{Op: "todo.clear", List: u.list})
-	case key.Matches(msg, keys.AlarmBack):
-		a.toMenu()
+	case key.Matches(msg, keys.Back):
+		return tea.Quit
 	}
 	return nil
-}
-
-// tabs renders the list names, scrolled so the selected one always fits.
-func (u *tasksUI) tabs(a *app, width int) string {
-	st := a.st
-	lists := u.lists(a)
-	tabs := make([]string, len(lists))
-	sel := 0
-	for i, l := range lists {
-		name := cmp.Or(l, "all")
-		tabs[i] = st.muted.Render(" " + name + " ")
-		if l == u.list {
-			tabs[i], sel = st.badge.Background(colorTask).Render(name), i
-		}
-	}
-	lo, hi := sel, sel+1
-	used := lipgloss.Width(tabs[sel]) + 4 // room for the ‹ › markers
-	for grew := true; grew; {
-		grew = false
-		if hi < len(tabs) && used+lipgloss.Width(tabs[hi]) <= width {
-			used += lipgloss.Width(tabs[hi])
-			hi, grew = hi+1, true
-		}
-		if lo > 0 && used+lipgloss.Width(tabs[lo-1]) <= width {
-			used += lipgloss.Width(tabs[lo-1])
-			lo, grew = lo-1, true
-		}
-	}
-	out := strings.Join(tabs[lo:hi], "")
-	if lo > 0 {
-		out = st.muted.Render("‹ ") + out
-	}
-	if hi < len(tabs) {
-		out += st.muted.Render(" ›")
-	}
-	return out
-}
-
-func (u *tasksUI) row(a *app, t todo, selected, overdue bool) string {
-	st := a.st
-	now := time.Now()
-	marker, box := "  ", lipgloss.NewStyle().Foreground(colorTask).Render("○")
-	if selected {
-		marker = st.selected.Render("▌ ")
-	}
-	if t.Done {
-		box = st.success.Render("✓")
-	}
-
-	when := ""
-	if t.Remind {
-		when = t.Due.Format("15:04")
-	}
-	whenStyle := lipgloss.NewStyle().Foreground(colorTask)
-	if t.Done {
-		whenStyle = st.muted
-	}
-	if overdue {
-		when = overdueWhen(t, now)
-		whenStyle = lipgloss.NewStyle().Foreground(colorAlarm)
-		box = whenStyle.Render("!")
-	}
-
-	suffix := ""
-	if u.list == "" {
-		suffix = "  " + t.List
-	}
-	room := taskWidth - 4 - lipgloss.Width(suffix)
-	if when != "" {
-		room -= lipgloss.Width(when) + 2
-	}
-	text := truncateRight(t.Text, max(room, 8))
-	textStyle := st.text
-	switch {
-	case t.Done:
-		textStyle = st.muted.Strikethrough(true)
-	case overdue:
-		textStyle = lipgloss.NewStyle().Foreground(colorAlarm).Bold(selected)
-	case selected:
-		textStyle = st.selected
-	}
-
-	out := marker + box + " "
-	if when != "" {
-		out += whenStyle.Render(when) + "  "
-	}
-	return out + textStyle.Render(text) + st.muted.Render(suffix)
 }
 
 func truncateRight(s string, w int) string {
@@ -225,33 +174,153 @@ func truncateRight(s string, w int) string {
 	if len(r) <= w {
 		return s
 	}
+	if w <= 1 {
+		return "…"
+	}
 	return string(r[:w-1]) + "…"
 }
 
-func (u *tasksUI) view(a *app) string {
-	st := a.st
-	now := time.Now()
-	items := u.visible(a)
-	u.cursor = max(min(u.cursor, len(items)-1), 0)
+// fit pads or cuts a styled line to exactly w cells.
+func fit(s string, w int) string {
+	if lipgloss.Width(s) > w {
+		return lipgloss.NewStyle().MaxWidth(w).Render(s)
+	}
+	return s + strings.Repeat(" ", w-lipgloss.Width(s))
+}
 
-	header := lipgloss.NewStyle().Bold(true).Foreground(colorTask).Render("TASKS") + "  " + u.tabs(a, taskWidth-7)
+// spread puts left and right at the two ends of a w-wide line.
+func spread(left, right string, w int) string {
+	return left + strings.Repeat(" ", max(w-lipgloss.Width(left)-lipgloss.Width(right), 1)) + right
+}
+
+// shortSpan renders a gap like 45m, 3h 20m, 2d.
+func shortSpan(d time.Duration) string {
+	switch {
+	case d < time.Minute:
+		return "<1m"
+	case d < time.Hour:
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	case d < 10*time.Hour:
+		return fmt.Sprintf("%dh %dm", int(d.Hours()), int(d.Minutes())%60)
+	case d < 48*time.Hour:
+		return fmt.Sprintf("%dh", int(d.Hours()))
+	}
+	return fmt.Sprintf("%dd", int(d.Hours()/24))
+}
+
+// relative says how far off a task is: "in 2h", "3h late", "1d late".
+func relative(t todo, overdue bool, now time.Time) (string, bool) {
+	switch {
+	case t.Done:
+		return "", false
+	case t.Remind && t.Due.After(now):
+		return "in " + shortSpan(t.Due.Sub(now)), false
+	case t.Remind:
+		return shortSpan(now.Sub(t.Due)) + " late", true
+	case overdue:
+		return shortSpan(dayOf(now).Sub(dayOf(t.Due))) + " late", true
+	}
+	return "", false
+}
+
+func (u *tasksUI) whenText(t todo, overdue bool, now time.Time) string {
+	if overdue {
+		return overdueWhen(t, now)
+	}
+	if t.Remind {
+		return t.Due.Format("15:04")
+	}
+	return ""
+}
+
+// sidebar lists every list with its open and overdue counts.
+func (u *tasksUI) sidebar(a *app, now time.Time, w int) []string {
+	st := a.st
+	lines := []string{st.muted.Bold(true).Render(" LISTS"), ""}
+	for _, l := range u.lists(a) {
+		open, late := 0, 0
+		for _, t := range a.state.Todos {
+			if l != "" && t.List != l {
+				continue
+			}
+			if !t.Done {
+				open++
+			}
+			if isOverdue(t, now) {
+				late++
+			}
+		}
+		counts := st.muted.Render(fmt.Sprint(open))
+		if late > 0 {
+			counts = lipgloss.NewStyle().Foreground(colorWarn).Render(fmt.Sprintf("%d!", late)) + " " + counts
+		}
+		marker, name := "  ", cmp.Or(l, "all")
+		name = truncateRight(name, max(w-4-lipgloss.Width(counts), 4))
+		if l == u.list {
+			marker, name = lipgloss.NewStyle().Foreground(colorTask).Render("▌ "), lipgloss.NewStyle().Bold(true).Foreground(colorTask).Render(name)
+		} else {
+			name = st.text.Render(name)
+		}
+		lines = append(lines, spread(marker+name, counts+" ", w))
+	}
+	return lines
+}
+
+// mainLines draws the tasks by day, scrolled to keep the cursor in a
+// height-line window (0 = no limit).
+func (u *tasksUI) mainLines(a *app, now time.Time, w, height int) []string {
+	st := a.st
+	groups := groupTasks(a.state.Todos, u.list, now)
+
+	// Column widths, so times and the right-hand notes line up.
+	timeW, listW, relW := 0, 0, 0
+	for _, g := range groups {
+		for _, t := range g.items {
+			timeW = max(timeW, lipgloss.Width(u.whenText(t, g.overdue, now)))
+			rel, _ := relative(t, g.overdue, now)
+			relW = max(relW, lipgloss.Width(rel))
+			if u.list == "" {
+				listW = max(listW, lipgloss.Width(t.List))
+			}
+		}
+	}
+	// The task text gets at least 24 cells; on a narrow terminal the
+	// "in 2h" column goes first, then the list column.
+	timeCol := 0
+	if timeW > 0 {
+		timeCol = timeW + 2
+	}
+	rightW := func() int {
+		r := relW
+		if listW > 0 {
+			r += listW + 3
+		}
+		return r
+	}
+	if w-4-timeCol-2-rightW() < 24 {
+		relW = 0
+	}
+	if w-4-timeCol-2-rightW() < 24 {
+		listW = 0
+	}
+	textW := max(w-4-timeCol-2-rightW(), 10)
 
 	var lines []string
 	cursorLine, i := 0, 0
-	for gi, g := range groupTasks(a.state.Todos, u.list, now) {
+	for gi, g := range groups {
 		if gi > 0 {
 			lines = append(lines, "")
 		}
 		title := st.muted.Bold(true).Render(g.title)
 		if g.overdue {
-			title = st.badge.Background(colorAlarm).Render(g.title)
+			title = st.badge.Background(colorWarn).Render(g.title)
 		}
 		lines = append(lines, title)
 		for _, t := range g.items {
 			if i == u.cursor {
 				cursorLine = len(lines)
 			}
-			lines = append(lines, u.row(a, t, i == u.cursor, g.overdue))
+			lines = append(lines, u.row(a, t, i == u.cursor, g.overdue, now, timeW, textW, listW, relW))
 			i++
 		}
 	}
@@ -259,33 +328,145 @@ func (u *tasksUI) view(a *app) string {
 		lines = append(lines, st.muted.Render("nothing here · a to add a task"))
 	}
 
-	// Keep the cursor in view when the list is taller than the window.
-	if limit := a.height - 16; a.height > 0 && len(lines) > max(limit, 6) {
-		limit = max(limit, 6)
-		start := min(max(cursorLine-limit/2, 0), len(lines)-limit)
-		more := func(n int, arrow string) string {
-			return st.muted.Render(fmt.Sprintf("%s %d more lines", arrow, n))
+	return scrollLines(st, lines, cursorLine, height)
+}
+
+// scrollLines keeps cursorLine in view when lines are taller than height
+// (0 = no limit), marking what is cut off above and below.
+func scrollLines(st styles, lines []string, cursorLine, height int) []string {
+	if height <= 0 || len(lines) <= height {
+		return lines
+	}
+	height = max(height, 3)
+	start := min(max(cursorLine-height/2, 0), len(lines)-height)
+	window := slices.Clone(lines[start : start+height])
+	if start > 0 {
+		window[0] = st.muted.Render(fmt.Sprintf("↑ %d more", start+1))
+	}
+	if rest := len(lines) - start - height; rest > 0 {
+		window[len(window)-1] = st.muted.Render(fmt.Sprintf("↓ %d more", rest+1))
+	}
+	return window
+}
+
+func (u *tasksUI) row(a *app, t todo, selected, overdue bool, now time.Time, timeW, textW, listW, relW int) string {
+	st := a.st
+	late := lipgloss.NewStyle().Foreground(colorWarn)
+	marker, box := "  ", lipgloss.NewStyle().Foreground(colorTask).Render("○")
+	if selected {
+		marker = lipgloss.NewStyle().Foreground(colorTask).Render("▌ ")
+	}
+	whenStyle, textStyle := lipgloss.NewStyle().Foreground(colorTask), st.text
+	switch {
+	case t.Done:
+		box, whenStyle, textStyle = st.success.Render("✓"), st.muted, st.muted.Strikethrough(true)
+	case overdue:
+		box, whenStyle, textStyle = late.Render("!"), late, late
+	}
+	if selected && !t.Done {
+		textStyle = textStyle.Bold(true)
+		if !overdue {
+			textStyle = textStyle.Foreground(colorTask)
 		}
-		window := []string{more(start, "↑")}
-		if start == 0 {
-			window[0] = ""
-		}
-		window = append(window, lines[start:start+limit]...)
-		if rest := len(lines) - start - limit; rest > 0 {
-			window = append(window, more(rest, "↓"))
-		}
-		lines = window
 	}
 
-	footer := st.muted.Render(shortHome(a.state.TasksDir))
-	if a.state.TaskErr != "" {
-		footer = st.errorMsg.Render("✗ " + a.state.TaskErr)
+	out := marker + box + " "
+	if timeW > 0 {
+		out += whenStyle.Render(fit(u.whenText(t, overdue, now), timeW)) + "  "
 	}
-	rows := append([]string{header, ""}, lines...)
-	rows = append(rows, "", footer)
-	body := lipgloss.NewStyle().Width(taskWidth).Render(strings.Join(rows, "\n"))
-	hk := helpKeys{keys.Down, keys.Up, keys.Check, keys.AddTask, keys.AddToList, keys.EditTask, keys.OpenFile, keys.DelTask, keys.ListNext, keys.ListPrev, keys.ClearDone, keys.AlarmBack, keys.Help}
-	return a.frame(body, colorTask, hk)
+	out += textStyle.Render(fit(truncateRight(t.Text, textW), textW)) + "  "
+	if listW > 0 {
+		out += st.muted.Render(fit(t.List, listW)) + "   "
+	}
+	rel, isLate := relative(t, overdue, now)
+	relStyle := st.muted
+	if isLate {
+		relStyle = late
+	}
+	return out + relStyle.Render(fit(rel, relW))
+}
+
+// view draws the task screen across the whole terminal: lists on the left,
+// tasks by day on the right, and the add/edit form as a panel at the bottom.
+func (u *tasksUI) view(a *app) string {
+	st := a.st
+	now := time.Now()
+	w := cmp.Or(a.width, 100)
+	items := u.visible(a)
+	u.cursor = max(min(u.cursor, len(items)-1), 0)
+	rule := st.muted.Render(strings.Repeat("─", w))
+
+	var panel []string
+	hk := helpKeys{keys.Down, keys.Up, keys.Check, keys.AddTask, keys.AddToList, keys.EditTask, keys.OpenFile,
+		keys.DelTask, keys.DelTaskNow, keys.ListNext, keys.ListPrev, keys.ClearDone, keys.DelList, keys.Back, keys.Help}
+	if a.screen == screenTaskAdd {
+		panel, hk = u.formPanel(a, w)
+	}
+	help := ""
+	if a.cfg.UI.ShowHelp {
+		a.help.Width = w - 2
+		help = lipgloss.NewStyle().PaddingLeft(1).Render(a.help.View(hk))
+	}
+
+	// Status bar: a pending question, a note, an error, or where the files are.
+	left := st.muted.Render(" " + shortHome(a.state.TasksDir))
+	switch {
+	case u.ask != "":
+		left = lipgloss.NewStyle().Bold(true).Foreground(colorWarn).Render(" " + u.ask + "  y / n")
+	case u.flash != "":
+		left = lipgloss.NewStyle().Foreground(colorWarn).Render(" " + u.flash)
+	case a.state.TaskErr != "":
+		left = st.errorMsg.Render(" ✗ " + a.state.TaskErr)
+	}
+	open, late := 0, 0
+	for _, t := range a.state.Todos {
+		if u.list == "" || t.List == u.list {
+			open += boolInt(!t.Done)
+			late += boolInt(isOverdue(t, now))
+		}
+	}
+	right := st.muted.Render(fmt.Sprintf("%d open", open))
+	if late > 0 {
+		right += st.muted.Render(" · ") + lipgloss.NewStyle().Foreground(colorWarn).Render(fmt.Sprintf("%d overdue", late))
+	}
+	status := spread(left, right+" ", w)
+
+	bodyH := 0
+	if a.height > 0 {
+		bodyH = max(a.height-4-len(panel)-lipgloss.Height(help)*boolInt(help != ""), 3)
+	}
+	sideW := 16
+	for _, l := range a.state.Lists {
+		sideW = max(sideW, lipgloss.Width(l)+10)
+	}
+	sideW = min(sideW, 28, w/3)
+	if w < 100 {
+		sideW = min(sideW, max(w/4, 14))
+	}
+	side := u.sidebar(a, now, sideW)
+	main := u.mainLines(a, now, w-sideW-3, bodyH)
+	n := max(len(side), len(main))
+	if bodyH > 0 {
+		n = bodyH
+	}
+	sep := st.muted.Render(" │ ")
+	rows := a.header(colorTask)
+	for i := range n {
+		l, r := "", ""
+		if i < len(side) {
+			l = side[i]
+		}
+		if i < len(main) {
+			r = main[i]
+		}
+		rows = append(rows, fit(l, sideW)+sep+r)
+	}
+	rows = append(rows, rule, status)
+	rows = append(rows, panel...)
+	if help != "" {
+		rows = append(rows, help)
+	}
+	return strings.Join(rows, "\n")
 }
 
 func shortHome(p string) string {
@@ -413,7 +594,8 @@ func (u *tasksUI) updateForm(a *app, msg tea.KeyMsg) tea.Cmd {
 	return nil
 }
 
-func (u *tasksUI) viewForm(a *app) string {
+// formPanel draws the add/edit form as lines for the bottom of the task screen.
+func (u *tasksUI) formPanel(a *app, w int) ([]string, helpKeys) {
 	st := a.st
 	f := &u.form
 	on := lipgloss.NewStyle().Bold(true).Foreground(colorTask)
@@ -425,16 +607,17 @@ func (u *tasksUI) viewForm(a *app) string {
 	if !f.showList {
 		title += st.muted.Render("  ·  " + list)
 	}
-	rows := []string{on.Render(title), ""}
-	for i, in := range f.inputs {
+	rows := []string{st.muted.Render(strings.Repeat("─", w)), " " + on.Render(title)}
+	for i := range f.inputs {
 		if i == 1 && !f.showList {
 			continue
 		}
+		f.inputs[i].Width = max(w-12, 10)
 		label := st.muted.Render(fmt.Sprintf("%-6s", formLabels[i]))
 		if i == f.focus {
 			label = on.Render(fmt.Sprintf("%-6s", formLabels[i]))
 		}
-		rows = append(rows, label+"  "+in.View())
+		rows = append(rows, " "+label+"  "+f.inputs[i].View())
 	}
 
 	var status string
@@ -456,19 +639,14 @@ func (u *tasksUI) viewForm(a *app) string {
 	if f.err != "" {
 		status = st.errorMsg.Render("✗ " + f.err)
 	}
-	rows = append(rows, "", status)
-	body := lipgloss.NewStyle().Width(taskWidth).Render(strings.Join(rows, "\n"))
+	rows = append(rows, " "+status)
 	hk := helpKeys{bind([]string{"enter"}, "enter", action), keys.NextField, keys.PrevField, bind([]string{"esc"}, "esc", "cancel")}
-	return a.frame(body, colorTask, hk)
+	return rows, hk
 }
 
-const taskUsage = `usage:
-  gg task [list]                          open the task lists
-  gg task add [list]                      write tasks in $EDITOR
-  gg task add list "text" [--time WHEN]   add one task
-  gg task ls [list]`
+var taskUsage = "usage: gg add [LIST] · gg add LIST \"TEXT\" [-t WHEN] · gg ls [DAY...] [LIST] · " + seeHelp
 
-// taskCommand runs gg task ... from the shell.
+// taskCommand runs gg add / gg ls from the shell.
 func taskCommand(args []string, out io.Writer) error {
 	switch args[0] {
 	case "add":
@@ -517,13 +695,32 @@ func taskCommand(args []string, out io.Writer) error {
 		return nil
 
 	case "ls", "list":
-		list := ""
-		if len(args) > 1 {
-			list = cleanList(args[1])
+		// Arguments that read as a day pick days; the other one is a list.
+		var list string
+		var days []time.Time
+		today := dayOf(time.Now())
+		for _, arg := range args[1:] {
+			if d, ok := parseDay(strings.ToLower(arg), today); ok {
+				days = append(days, d)
+			} else if list == "" {
+				list = cleanList(arg)
+			} else {
+				return errors.New(taskUsage)
+			}
 		}
 		s, err := call(request{Op: "get"})
 		if err != nil {
 			return err
+		}
+		if len(days) > 0 {
+			slices.SortFunc(days, time.Time.Compare)
+			for i, d := range slices.CompactFunc(days, time.Time.Equal) {
+				if i > 0 {
+					fmt.Fprintln(out)
+				}
+				printDay(out, s.Todos, list, d, time.Now())
+			}
+			return nil
 		}
 		groups := groupTasks(s.Todos, list, time.Now())
 		if len(groups) == 0 {
@@ -556,4 +753,62 @@ func taskCommand(args []string, out io.Writer) error {
 		return nil
 	}
 	return errors.New(taskUsage)
+}
+
+// printDay prints every task on one day, open ones first (reminders by
+// time), then the finished ones, with list and how late or soon each is.
+func printDay(out io.Writer, todos []todo, list string, day, now time.Time) {
+	var mine []todo
+	for _, t := range todos {
+		if (list == "" || t.List == list) && dayOf(t.Due).Equal(day) {
+			mine = append(mine, t)
+		}
+	}
+	slices.SortFunc(mine, compareTodos)
+	done := 0
+	textW, listW := 0, 0
+	for _, t := range mine {
+		done += boolInt(t.Done)
+		textW = max(textW, min(lipgloss.Width(t.Text), 50))
+		listW = max(listW, lipgloss.Width(t.List))
+	}
+
+	muted := lipgloss.NewStyle().Foreground(colorMuted)
+	late := lipgloss.NewStyle().Foreground(colorWarn)
+	title := lipgloss.NewStyle().Bold(true).Render(dayTitle(day, dayOf(now)))
+	where := ""
+	if list != "" {
+		where = " · " + list
+	}
+	if len(mine) == 0 {
+		fmt.Fprintln(out, title+muted.Render("  ·  nothing"+where))
+		return
+	}
+	fmt.Fprintln(out, title+muted.Render(fmt.Sprintf("  ·  %d open · %d done%s", len(mine)-done, done, where)))
+	for _, t := range mine {
+		box, when := "[ ]", "     "
+		if t.Done {
+			box = "[x]"
+		}
+		if t.Remind {
+			when = t.Due.Format("15:04")
+		}
+		status, isLate := relative(t, isOverdue(t, now), now)
+		if t.Done {
+			status = "done"
+		}
+		line := fmt.Sprintf("  %s %s  %s", box, when, fit(truncateRight(t.Text, 50), textW))
+		if list == "" {
+			line += "  " + fit(t.List, listW)
+		}
+		switch {
+		case t.Done:
+			line = muted.Render(line + "  " + status)
+		case isLate:
+			line = late.Render(line + "  " + status)
+		default:
+			line += "  " + muted.Render(status)
+		}
+		fmt.Fprintln(out, strings.TrimRight(line, " "))
+	}
 }
