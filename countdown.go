@@ -8,51 +8,51 @@ import (
 // countdown tracks remaining time against the wall clock, so it doesn't
 // drift the way decrementing on every tick does.
 type countdown struct {
-	total     time.Duration
-	endAt     time.Time
-	remaining time.Duration // frozen value while paused
-	paused    bool
+	Total  time.Duration `json:"total"`
+	EndAt  time.Time     `json:"end_at"`
+	Left   time.Duration `json:"left"` // frozen remaining time while paused
+	Paused bool          `json:"paused"`
 }
 
 func newCountdown(d time.Duration) countdown {
-	return countdown{total: d, endAt: time.Now().Add(d)}
+	return countdown{Total: d, EndAt: time.Now().Add(d)}
 }
 
 func (c countdown) Remaining() time.Duration {
-	if c.paused {
-		return c.remaining
+	if c.Paused {
+		return c.Left
 	}
-	return max(time.Until(c.endAt), 0)
+	return max(time.Until(c.EndAt), 0)
 }
 
 func (c countdown) Done() bool { return c.Remaining() <= 0 }
 
 func (c countdown) Percent() float64 {
-	if c.total <= 0 {
+	if c.Total <= 0 {
 		return 1
 	}
-	return min(max(1-c.Remaining().Seconds()/c.total.Seconds(), 0), 1)
+	return min(max(1-c.Remaining().Seconds()/c.Total.Seconds(), 0), 1)
 }
 
 func (c *countdown) Toggle() {
-	if c.paused {
-		c.endAt = time.Now().Add(c.remaining)
-		c.paused = false
+	if c.Paused {
+		c.EndAt = time.Now().Add(c.Left)
+		c.Paused = false
 	} else {
-		c.remaining = c.Remaining()
-		c.paused = true
+		c.Left = c.Remaining()
+		c.Paused = true
 	}
 }
 
 // Adjust changes the total length by d, keeping the total at least min.
 func (c *countdown) Adjust(d, minTotal time.Duration) {
-	if c.total+d < minTotal {
-		d = minTotal - c.total
+	if c.Total+d < minTotal {
+		d = minTotal - c.Total
 	}
-	c.total += d
-	c.endAt = c.endAt.Add(d)
-	if c.paused {
-		c.remaining = max(c.remaining+d, 0)
+	c.Total += d
+	c.EndAt = c.EndAt.Add(d)
+	if c.Paused {
+		c.Left = max(c.Left+d, 0)
 	}
 }
 

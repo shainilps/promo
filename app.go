@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"time"
 
 	"github.com/charmbracelet/bubbles/help"
@@ -16,16 +17,30 @@ const (
 	screenPomodoro
 	screenTimer
 	screenAlarmSet
+	screenAlarms
 	screenAlarm
 	screenSettings
 )
 
-type tickMsg time.Time
+type (
+	tickMsg  time.Time
+	stateMsg State
+	lostMsg  struct{}
+)
 
-// A single tick chain drives every countdown, so timers keep running in the
-// background while another screen is open.
+// The daemon runs the countdowns; the tick only redraws them.
 func tick() tea.Cmd {
 	return tea.Tick(250*time.Millisecond, func(t time.Time) tea.Msg { return tickMsg(t) })
+}
+
+func waitState(ch <-chan State) tea.Cmd {
+	return func() tea.Msg {
+		s, ok := <-ch
+		if !ok {
+			return lostMsg{}
+		}
+		return stateMsg(s)
+	}
 }
 
 type app struct {
@@ -35,15 +50,16 @@ type app struct {
 	help          help.Model
 	width, height int
 	screen        screen
-	oneShot       bool       // launched via a CLI shortcut: quit when that mode finishes
-	ringing       *soundLoop // pomodoro/timer end sound, looping until a key is pressed
+	oneShot       bool // launched via a CLI shortcut: quit when that mode finishes
 	warning       string
+
+	state   State        // latest copy from the daemon
+	updates <-chan State // pushed by the daemon on every change
+	err     error        // lost the daemon; quit and report it
 
 	editor   lengthEditor
 	menu     menuModel
-	pomo     pomodoro
-	timer    timerModel
-	alarm    alarmModel
+	alarm    alarmUI
 	settings settingsModel
 }
 
@@ -66,26 +82,43 @@ func (a *app) toMenu() {
 	a.oneShot = false
 }
 
-func (a *app) shutdown() {
-	a.alarm.loop.Stop()
-	a.stopRing()
+// send runs a request on the daemon and takes the state it returns.
+func (a *app) send(r request) {
+	s, err := call(r)
+	if err != nil {
+		a.err = errors.New("lost connection to the promo daemon")
+		return
+	}
+	a.setState(s)
 }
 
-// ring loops the end-of-phase sound until any key is pressed, and brings
-// the finished screen to the front.
-func (a *app) ring(s screen) {
-	a.stopRing()
-	a.ringing = startSoundLoop(a.cfg.soundFor(false))
-	a.editor.active = false
-	a.screen = s
+// setState takes a newer state and brings whatever just started ringing to
+// the front.
+func (a *app) setState(s State) {
+	if s.Seq < a.state.Seq {
+		return
+	}
+	old := a.state
+	a.state = s
+	if s.Ring != "" && s.Ring != old.Ring {
+		a.editor.active = false
+		a.screen = screenTimer
+		if s.Ring == ringPomodoro {
+			a.screen = screenPomodoro
+		}
+	}
+	for _, al := range s.Alarms {
+		if prev := old.alarm(al.ID); al.Ringing && (prev == nil || !prev.Ringing) {
+			a.editor.active = false
+			a.alarm.show(a, al.ID)
+		}
+	}
+	if a.screen == screenAlarm && s.alarm(a.alarm.sel) == nil {
+		a.alarm.leave(a)
+	}
 }
 
-func (a *app) stopRing() {
-	a.ringing.Stop()
-	a.ringing = nil
-}
-
-func (a *app) Init() tea.Cmd { return tick() }
+func (a *app) Init() tea.Cmd { return tea.Batch(tick(), waitState(a.updates)) }
 
 func (a *app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
@@ -94,42 +127,60 @@ func (a *app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case tickMsg:
-		return a, tea.Batch(tick(), a.pomo.tick(a), a.timer.tick(a), a.alarm.tick(a))
+		return a, tick()
+
+	case stateMsg:
+		a.setState(State(msg))
+		return a, waitState(a.updates)
+
+	case lostMsg:
+		a.err = errors.New("the promo daemon stopped")
+		return a, tea.Quit
 
 	case tea.KeyMsg:
-		if key.Matches(msg, keys.ForceQuit) {
-			a.shutdown()
+		cmd := a.handleKey(msg)
+		if a.err != nil {
 			return a, tea.Quit
 		}
-		// Any key silences a ringing pomodoro/timer, then still does its job
-		// (enter/space starts the next phase).
-		if a.ringing != nil {
-			a.stopRing()
-		}
-		if a.editor.active {
-			return a, a.editor.update(msg)
-		}
-		typing := a.screen == screenSettings && a.settings.mode == modeInsert
-		if !typing && key.Matches(msg, keys.Help) {
-			a.help.ShowAll = !a.help.ShowAll
-			return a, nil
-		}
-		switch a.screen {
-		case screenMenu:
-			return a, a.menu.update(a, msg)
-		case screenPomodoro:
-			return a, a.pomo.update(a, msg)
-		case screenTimer:
-			return a, a.timer.update(a, msg)
-		case screenAlarmSet:
-			return a, a.alarm.updateSetter(a, msg)
-		case screenAlarm:
-			return a, a.alarm.update(a, msg)
-		case screenSettings:
-			return a, a.settings.update(a, msg)
-		}
+		return a, cmd
 	}
 	return a, nil
+}
+
+func (a *app) handleKey(msg tea.KeyMsg) tea.Cmd {
+	if key.Matches(msg, keys.ForceQuit) {
+		return tea.Quit
+	}
+	// Any key silences a ringing pomodoro/timer, then still does its job
+	// (enter/space starts the next phase).
+	if a.state.Ring != "" {
+		a.send(request{Op: "silence"})
+	}
+	if a.editor.active {
+		return a.editor.update(msg)
+	}
+	typing := a.screen == screenSettings && a.settings.mode == modeInsert
+	if !typing && key.Matches(msg, keys.Help) {
+		a.help.ShowAll = !a.help.ShowAll
+		return nil
+	}
+	switch a.screen {
+	case screenMenu:
+		return a.menu.update(a, msg)
+	case screenPomodoro:
+		return a.state.Pomo.update(a, msg)
+	case screenTimer:
+		return a.state.Timer.update(a, msg)
+	case screenAlarmSet:
+		return a.alarm.updateSetter(a, msg)
+	case screenAlarms:
+		return a.alarm.updateList(a, msg)
+	case screenAlarm:
+		return a.alarm.update(a, msg)
+	case screenSettings:
+		return a.settings.update(a, msg)
+	}
+	return nil
 }
 
 func (a *app) View() string {
@@ -138,11 +189,13 @@ func (a *app) View() string {
 	}
 	switch a.screen {
 	case screenPomodoro:
-		return a.pomo.view(a)
+		return a.state.Pomo.view(a)
 	case screenTimer:
-		return a.timer.view(a)
+		return a.state.Timer.view(a)
 	case screenAlarmSet:
 		return a.alarm.viewSetter(a)
+	case screenAlarms:
+		return a.alarm.viewList(a)
 	case screenAlarm:
 		return a.alarm.view(a)
 	case screenSettings:

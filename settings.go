@@ -235,6 +235,7 @@ func (s *settingsModel) save(a *app) (tea.Cmd, bool) {
 	}
 	old := a.cfg
 	a.applyConfig(s.draft)
+	a.send(request{Op: "reload"})
 	a.warning = ""
 	s.setFlash("saved ✓")
 	if old.UI.Fullscreen != s.draft.UI.Fullscreen {

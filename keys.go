@@ -10,9 +10,8 @@ var keys = struct {
 	ForceQuit, Quit, Help, Back                                       key.Binding
 	Up, Down, Top, Bottom, Select                                     key.Binding
 	Start, Pause, EditTime, EditFocus, EditBreak, Skip, Stop, Restart key.Binding
-	Confirm                                                           key.Binding
 	FieldLeft, FieldRight, Inc, Dec, Inc10, Dec10, SetAlarm           key.Binding
-	AlarmBack, Cancel, Dismiss, Snooze                                key.Binding
+	AlarmBack, Cancel, Dismiss, Snooze, NewAlarm                      key.Binding
 	Edit, Toggle, Save, Undo, Leave, Commit, Discard, Accept          key.Binding
 }{
 	ForceQuit: bind([]string{"ctrl+c"}, "ctrl+c", "quit"),
@@ -31,7 +30,6 @@ var keys = struct {
 	EditTime:  bind([]string{"e"}, "e", "edit length"),
 	EditFocus: bind([]string{"f"}, "f", "edit focus"),
 	EditBreak: bind([]string{"b"}, "b", "edit break"),
-	Confirm:   bind([]string{"y", "q"}, "y", "quit"),
 	Skip:      bind([]string{"s"}, "s", "skip"),
 	Stop:      bind([]string{"x"}, "x", "stop"),
 	Restart:   bind([]string{"r"}, "r", "restart"),
@@ -44,10 +42,11 @@ var keys = struct {
 	Dec10:      bind([]string{"J"}, "J", "-10"),
 	SetAlarm:   bind([]string{"enter"}, "enter", "set alarm"),
 
-	AlarmBack: bind([]string{"esc", "q"}, "esc", "menu"),
+	AlarmBack: bind([]string{"esc", "q"}, "esc", "back"),
 	Cancel:    bind([]string{"x"}, "x", "cancel alarm"),
 	Dismiss:   bind([]string{"enter", " ", "esc", "q"}, "enter/space", "stop"),
 	Snooze:    bind([]string{"s"}, "s", "snooze"),
+	NewAlarm:  bind([]string{"a", "n"}, "a", "new alarm"),
 
 	Edit:    bind([]string{"i", "enter", "l", "a"}, "i/enter", "edit"),
 	Toggle:  bind([]string{" "}, "space", "toggle"),

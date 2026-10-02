@@ -33,11 +33,14 @@ func (p clockPicker) duration() time.Duration {
 
 // handle applies a picker key and reports whether it was one.
 func (p *clockPicker) handle(msg tea.KeyMsg) bool {
-	s := msg.String()
-	if len(s) == 1 && s[0] >= '0' && s[0] <= '9' {
-		p.typeDigit(int(s[0] - '0'))
+	// Fast typing or a paste can deliver several digits in one message.
+	if msg.Type == tea.KeyRunes && len(msg.Runes) > 0 && strings.Trim(string(msg.Runes), "0123456789") == "" {
+		for _, r := range msg.Runes {
+			p.typeDigit(int(r - '0'))
+		}
 		return true
 	}
+	s := msg.String()
 	p.typed = 0
 	switch {
 	case s == "tab":
