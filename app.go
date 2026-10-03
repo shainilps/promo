@@ -12,17 +12,6 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-type screen int
-
-const (
-	screenTasks screen = iota
-	screenPomodoro
-	screenTaskAdd
-	screenSettings
-	screenRoutines
-	screenRoutineForm
-)
-
 type (
 	tickMsg  time.Time
 	stateMsg State
@@ -50,17 +39,12 @@ type app struct {
 	st            styles
 	help          help.Model
 	width, height int
-	screen        screen
-	warning       string
 
 	state   State        // latest copy from the daemon
 	updates <-chan State // pushed by the daemon on every change
 	err     error        // lost the daemon; quit and report it
 
-	editor   lengthEditor
-	tasks    tasksUI
-	routines routinesUI
-	settings settingsModel
+	editor lengthEditor
 }
 
 func newApp(cfg Config, path string) *app {
@@ -109,13 +93,6 @@ func (a *app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.setState(State(msg))
 		return a, waitState(a.updates)
 
-	case listEditedMsg:
-		a.send(request{Op: "tasks.reload"})
-		if a.err != nil {
-			return a, tea.Quit
-		}
-		return a, nil
-
 	case lostMsg:
 		a.err = errors.New("the gg daemon stopped (gg stop, or a newer gg replaced it; just run gg again)")
 		return a, tea.Quit
@@ -142,76 +119,27 @@ func (a *app) handleKey(msg tea.KeyMsg) tea.Cmd {
 	if a.editor.active {
 		return a.editor.update(msg)
 	}
-	typing := a.screen == screenTaskAdd || a.screen == screenRoutineForm || (a.screen == screenSettings && a.settings.mode == modeInsert)
-	if !typing && key.Matches(msg, keys.Help) {
+	if key.Matches(msg, keys.Help) {
 		a.help.ShowAll = !a.help.ShowAll
 		return nil
 	}
-	switch a.screen {
-	case screenPomodoro:
-		return a.state.Pomo.update(a, msg)
-	case screenTasks:
-		return a.tasks.update(a, msg)
-	case screenTaskAdd, screenRoutineForm:
-		return a.tasks.updateForm(a, msg)
-	case screenRoutines:
-		return a.routines.update(a, msg)
-	case screenSettings:
-		return a.settings.update(a, msg)
-	}
-	return nil
+	return a.state.Pomo.update(a, msg)
 }
 
 func (a *app) View() string {
 	if a.editor.active {
 		return a.editor.view(a)
 	}
-	switch a.screen {
-	case screenPomodoro:
-		return a.state.Pomo.view(a)
-	case screenSettings:
-		return a.settings.view(a)
-	case screenRoutines, screenRoutineForm:
-		return a.routines.view(a)
-	default: // the tasks and the add/edit panel
-		return a.tasks.view(a)
-	}
+	return a.state.Pomo.view(a)
 }
 
-var screenNames = map[screen]string{
-	screenPomodoro:    "pomodoro",
-	screenTasks:       "tasks",
-	screenTaskAdd:     "tasks",
-	screenSettings:    "settings",
-	screenRoutines:    "routines",
-	screenRoutineForm: "routines",
-}
-
-// header is the bar across the top of every screen: where you are on the
+// header is the bar across the top of the screen: where you are on the
 // left, the date on the right, and a rule under it.
 func (a *app) header(color lipgloss.TerminalColor) []string {
 	w := cmp.Or(a.width, 80)
-	left := " " + lipgloss.NewStyle().Bold(true).Foreground(color).Render("gg")
-	if name := screenNames[a.screen]; name != "" {
-		left += a.st.muted.Render(" · " + name)
-	}
+	left := " " + lipgloss.NewStyle().Bold(true).Foreground(color).Render("gg") + a.st.muted.Render(" · pomodoro")
 	right := a.st.muted.Render(time.Now().Format("Mon 02 Jan · 15:04")) + " "
-	if ring := a.ringingNote(); ring != "" {
-		badge := a.st.badge.Background(colorWarn)
-		if !blinkOn() {
-			badge = badge.Faint(true)
-		}
-		right = badge.Render(ring) + "  " + right
-	}
 	return []string{spread(left, right, w), a.st.muted.Render(strings.Repeat("─", w))}
-}
-
-// ringingNote flags a ringing pomodoro in the header of other screens.
-func (a *app) ringingNote() string {
-	if a.state.Ring != "" && a.screen != screenPomodoro {
-		return "POMODORO RINGING · any key silences"
-	}
-	return ""
 }
 
 // frame lays a screen out over the whole terminal: the header bar, the body

@@ -49,6 +49,7 @@ type todo struct {
 	Every  repeat    `json:"every,omitempty"` // a routine: the days it repeats on; Due holds only the time
 	Of     int       `json:"of,omitempty"`    // a routine's task for one day: the routine's ID; not stored
 
+	line     int       // the line it was read from, for errors
 	reminded bool      // daemon only: the notification for this reminder went out
 	since    time.Time // daemon only: when a routine was added or rescheduled; it isn't due before then
 }
@@ -106,6 +107,18 @@ func (r repeat) String() string {
 
 // monFirst is the i-th day of a week that starts on Monday (any such week).
 func monFirst(i int) time.Time { return time.Date(2024, 1, 1+i, 0, 0, 0, 0, time.Local) }
+
+// heading is how a routine's heading is written: daily, weekdays,
+// weekends, every mon, thu.
+func (r repeat) heading() string {
+	switch r {
+	case everyDay:
+		return "daily"
+	case weekdays, weekends:
+		return r.String() + "s"
+	}
+	return "every " + r.String()
+}
 
 // flag is the form --time takes: daily, weekdays, weekends, every-mon,thu.
 func (r repeat) flag() string {
@@ -241,9 +254,12 @@ func parseClock(s string) (hour, minute int, err error) {
 	return 0, 0, fmt.Errorf("invalid time %q (try 07:30 or 7:30pm)", s)
 }
 
-// parseDay reads today, tomorrow, yesterday, 9/10/2029 or 9/10 (this year), plus the
-// 2026-10-02 form the list files use. Dates are day/month.
+// parseDay reads today, tomorrow, yesterday, a weekday (the next one,
+// today included), 9/10/2029 or 9/10 (day/month), 02 Oct or Fri 02 Oct,
+// plus the 2026-10-02 form the list files use. A date without a year is
+// the one nearest to today.
 func parseDay(s string, today time.Time) (time.Time, bool) {
+	s = strings.ToLower(strings.Join(strings.Fields(s), " "))
 	switch s {
 	case "today":
 		return today, true
@@ -252,14 +268,26 @@ func parseDay(s string, today time.Time) (time.Time, bool) {
 	case "yesterday":
 		return today.AddDate(0, 0, -1), true
 	}
-	if t, err := time.ParseInLocation("2/1/2006", s, time.Local); err == nil {
-		return t, true
+	for i := range 7 {
+		if d := today.AddDate(0, 0, i); len(s) >= 3 && strings.HasPrefix(strings.ToLower(d.Weekday().String()), s) {
+			return d, true
+		}
 	}
-	if t, err := time.ParseInLocation("2006-01-02", s, time.Local); err == nil {
-		return t, true
+	for _, layout := range []string{"2/1/2006", "2006-01-02", "2 Jan 2006", "Mon 2 Jan 2006"} {
+		if t, err := time.ParseInLocation(layout, s, time.Local); err == nil {
+			return t, true
+		}
 	}
-	if t, err := time.ParseInLocation("2/1", s, time.Local); err == nil {
-		return time.Date(today.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.Local), true
+	for _, layout := range []string{"2/1", "2 Jan", "Mon 2 Jan"} {
+		if t, err := time.ParseInLocation(layout, s, time.Local); err == nil {
+			d := time.Date(today.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.Local)
+			if d.Sub(today) > 183*24*time.Hour {
+				d = d.AddDate(-1, 0, 0)
+			} else if today.Sub(d) > 183*24*time.Hour {
+				d = d.AddDate(1, 0, 0)
+			}
+			return d, true
+		}
 	}
 	return time.Time{}, false
 }
@@ -678,21 +706,13 @@ func (s *taskStore) save(list string, todos []todo) error {
 	for _, t := range mine {
 		h := dayOf(t.Due).Format("2006-01-02 Mon")
 		if t.Every != 0 {
-			h = "every " + t.Every.String()
+			h = t.Every.heading()
 		}
 		if h != heading {
 			heading = h
 			fmt.Fprintf(&buf, "\n## %s\n\n", heading)
 		}
-		box := " "
-		if t.Done {
-			box = "x"
-		}
-		text := t.Text
-		if t.Remind {
-			text = t.Due.Format("15:04") + " " + text
-		}
-		fmt.Fprintf(&buf, "- [%s] %s\n", box, text)
+		buf.WriteString(taskMarkdown(t) + "\n")
 	}
 	if err := os.MkdirAll(s.dir, 0o755); err != nil {
 		return err

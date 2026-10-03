@@ -2,7 +2,9 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -262,4 +264,58 @@ func validateSoundPath(s string) error {
 		return fmt.Errorf("is a directory")
 	}
 	return nil
+}
+
+var yamlLine = regexp.MustCompile(`line (\d+)`)
+
+// editConfig opens the config in the editor. It's written back only once
+// it reads and every value is valid; otherwise the editor reopens on the
+// problem. The daemon then picks it up.
+func editConfig(path string, in io.Reader, out io.Writer) error {
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		if err := saveConfig(path, defaultConfig()); err != nil {
+			return err
+		}
+		data, err = os.ReadFile(path)
+	}
+	if err != nil {
+		return err
+	}
+	f, err := os.CreateTemp("", "gg-config-*.yaml")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	defer os.Remove(tmp)
+	f.Write(data)
+	f.Close()
+
+	return editUntilRead(tmp, "# gg: %s", in, out, func(text string) error {
+		if text == string(data) {
+			fmt.Fprintln(out, "no changes")
+			return nil
+		}
+		cfg := defaultConfig()
+		if err := yaml.Unmarshal([]byte(text), &cfg); err != nil {
+			msg := strings.TrimPrefix(err.Error(), "yaml: ")
+			if m := yamlLine.FindStringSubmatch(msg); m != nil {
+				var n int
+				fmt.Sscan(m[1], &n)
+				return &lineError{n, strings.TrimSpace(yamlLine.ReplaceAllString(msg, ""))}
+			}
+			return errors.New(msg)
+		}
+		if warnings := cfg.normalize(); len(warnings) > 0 {
+			return errors.New(strings.Join(warnings, "; "))
+		}
+		if err := writeFileAtomic(path, []byte(text)); err != nil {
+			return err
+		}
+		if _, err := call(request{Op: "reload"}); err != nil {
+			return err
+		}
+		fmt.Fprintln(out, "saved "+shortHome(path))
+		return nil
+	})
 }

@@ -52,6 +52,9 @@ type request struct {
 	Remind bool   `json:"remind,omitempty"`
 	Every  repeat `json:"every,omitempty"`
 
+	Lists []string `json:"lists,omitempty"` // lists.set: the lists a document showed
+	Todos []todo   `json:"todos,omitempty"` // lists.set: what it holds now
+
 	State *State `json:"state,omitempty"` // restore: what the previous daemon was running
 }
 
@@ -272,58 +275,57 @@ func (d *daemon) apply(r request) {
 		d.st.Todos = append(d.st.Todos, todo{ID: d.tasks.nextID, List: list, Text: text, Due: r.At, Remind: r.Remind, Every: r.Every, since: time.Now()})
 		d.syncRoutines(time.Now())
 		d.saveLists(list)
-	case "todo.edit":
-		for i := range d.st.Todos {
-			t := &d.st.Todos[i]
-			if t.ID != r.ID {
-				continue
-			}
-			old := t.List
-			if !t.Due.Equal(r.At) || t.Remind != r.Remind || t.Every != r.Every {
-				t.reminded = r.Remind && !r.At.After(time.Now())
-				t.since = time.Now()
-			}
-			t.List, t.Text, t.Due, t.Remind, t.Every = cleanList(r.List), strings.Join(strings.Fields(r.Text), " "), r.At, r.Remind, r.Every
-			list := t.List
-			d.syncRoutines(time.Now()) // today's task follows its routine
-			d.saveLists(old, list)
-			break
-		}
-	case "list.remove":
-		list := cleanList(r.List)
-		d.st.Todos = slices.DeleteFunc(d.st.Todos, func(t todo) bool { return t.List == list })
-		d.saveLists(list)
-	case "tasks.reload":
-		d.reportTaskErr(d.loadTasks())
-	case "todo.toggle":
-		for i := range d.st.Todos {
-			if t := &d.st.Todos[i]; t.ID == r.ID && t.Every == 0 {
-				t.Done = !t.Done
-				d.saveLists(t.List)
-			}
-		}
-	case "todo.remove":
-		for i, t := range d.st.Todos {
-			if t.ID == r.ID {
-				d.st.Todos = slices.Delete(d.st.Todos, i, i+1)
-				d.syncRoutines(time.Now())
-				d.saveLists(t.List)
-				break
-			}
-		}
-	case "todo.clear": // drop finished tasks from one list, or every list
-		var touched []string
-		d.st.Todos = slices.DeleteFunc(d.st.Todos, func(t todo) bool {
-			// A routine's finished task stays, or it would come back unchecked.
-			if t.Done && t.Of == 0 && (r.List == "" || t.List == r.List) {
-				touched = append(touched, t.List)
-				return true
-			}
-			return false
-		})
-		slices.Sort(touched)
-		d.saveLists(slices.Compact(touched)...)
+	case "lists.set": // a saved gg document
+		d.setLists(r.Lists, r.Todos)
 	}
+}
+
+// setLists replaces what a document showed of the given lists with what
+// it holds now. What it didn't show (past finished tasks, missed days)
+// stays. Tasks for other lists are added to them. Reminders keep whether
+// they were sent, and a new routine whose time already passed today
+// starts tomorrow.
+func (d *daemon) setLists(lists []string, todos []todo) {
+	now := time.Now()
+	today := dayOf(now)
+	covered := map[string]bool{}
+	touched := []string{}
+	for _, l := range lists {
+		covered[cleanList(l)] = true
+		touched = append(touched, cleanList(l))
+	}
+	old, stale := map[string]todo{}, map[string]bool{}
+	d.st.Todos = slices.DeleteFunc(d.st.Todos, func(t todo) bool {
+		if !covered[t.List] || docHidden(t, today) {
+			return false
+		}
+		old[t.key()] = t
+		stale[t.key()] = t.Of != 0 && !t.Done
+		return true
+	})
+	for _, t := range todos {
+		t.List, t.Text = cleanList(t.List), strings.Join(strings.Fields(t.Text), " ")
+		d.tasks.nextID++
+		t.ID, t.Of = d.tasks.nextID, 0
+		if o, ok := old[t.key()]; ok {
+			t.reminded, t.since = o.reminded, o.since
+		} else {
+			t.reminded = t.Remind && !t.Due.After(now)
+			if t.Every != 0 {
+				t.since = now
+			}
+		}
+		d.st.Todos = append(d.st.Todos, t)
+		touched = append(touched, t.List)
+	}
+	d.syncRoutines(now)
+	// Today's unchecked task for a routine that was changed or deleted goes;
+	// the changed routine has a new one by now.
+	d.st.Todos = slices.DeleteFunc(d.st.Todos, func(t todo) bool {
+		return t.Of == 0 && t.Every == 0 && !t.Done && stale[t.key()]
+	})
+	slices.Sort(touched)
+	d.saveLists(slices.Compact(touched)...)
 }
 
 // loadTasks (re)reads every list file. Reminders keep their sent state
