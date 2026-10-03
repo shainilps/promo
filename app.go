@@ -19,6 +19,8 @@ const (
 	screenPomodoro
 	screenTaskAdd
 	screenSettings
+	screenRoutines
+	screenRoutineForm
 )
 
 type (
@@ -57,6 +59,7 @@ type app struct {
 
 	editor   lengthEditor
 	tasks    tasksUI
+	routines routinesUI
 	settings settingsModel
 }
 
@@ -139,7 +142,7 @@ func (a *app) handleKey(msg tea.KeyMsg) tea.Cmd {
 	if a.editor.active {
 		return a.editor.update(msg)
 	}
-	typing := a.screen == screenTaskAdd || (a.screen == screenSettings && a.settings.mode == modeInsert)
+	typing := a.screen == screenTaskAdd || a.screen == screenRoutineForm || (a.screen == screenSettings && a.settings.mode == modeInsert)
 	if !typing && key.Matches(msg, keys.Help) {
 		a.help.ShowAll = !a.help.ShowAll
 		return nil
@@ -149,8 +152,10 @@ func (a *app) handleKey(msg tea.KeyMsg) tea.Cmd {
 		return a.state.Pomo.update(a, msg)
 	case screenTasks:
 		return a.tasks.update(a, msg)
-	case screenTaskAdd:
+	case screenTaskAdd, screenRoutineForm:
 		return a.tasks.updateForm(a, msg)
+	case screenRoutines:
+		return a.routines.update(a, msg)
 	case screenSettings:
 		return a.settings.update(a, msg)
 	}
@@ -166,16 +171,20 @@ func (a *app) View() string {
 		return a.state.Pomo.view(a)
 	case screenSettings:
 		return a.settings.view(a)
+	case screenRoutines, screenRoutineForm:
+		return a.routines.view(a)
 	default: // the tasks and the add/edit panel
 		return a.tasks.view(a)
 	}
 }
 
 var screenNames = map[screen]string{
-	screenPomodoro: "pomodoro",
-	screenTasks:    "tasks",
-	screenTaskAdd:  "tasks",
-	screenSettings: "settings",
+	screenPomodoro:    "pomodoro",
+	screenTasks:       "tasks",
+	screenTaskAdd:     "tasks",
+	screenSettings:    "settings",
+	screenRoutines:    "routines",
+	screenRoutineForm: "routines",
 }
 
 // header is the bar across the top of every screen: where you are on the

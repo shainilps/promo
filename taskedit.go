@@ -23,6 +23,8 @@ const draftHelp = `<!--
   - [ ] some task     a task for that day
   - [ ] 13:00 task    a reminder: you get a notification at 13:00 that day
                       (9am and 7:30pm work too)
+  ## weekdays         tasks below repeat: daily, weekdays, weekends,
+                      mon-fri, every mon, thu
 
   Example:
 
@@ -32,6 +34,9 @@ const draftHelp = `<!--
   - [ ] review the pr
   ## 9/10/2029
   - [ ] 13:00 dentist
+  ## weekdays
+  - [ ] 09:30 check in
+  - [ ] 18:00 check out
 -->
 `
 
@@ -54,6 +59,7 @@ func parseDraft(text, list string, now time.Time) ([]todo, error) {
 	})
 	today := dayOf(now)
 	day := today
+	var every repeat
 	var todos []todo
 	sc := bufio.NewScanner(strings.NewReader(text))
 	for n := 1; sc.Scan(); n++ {
@@ -62,25 +68,32 @@ func parseDraft(text, list string, now time.Time) ([]todo, error) {
 		case line == "":
 		case strings.HasPrefix(line, "## "):
 			head := strings.ToLower(strings.TrimSpace(line[3:]))
+			if r, ok := parseRepeat(head); ok {
+				every = r
+				break
+			}
 			d, ok := parseDay(head, today)
 			if !ok {
 				d, ok = parseDay(strings.Fields(head + " x")[0], today) // "2026-10-02 Fri"
 			}
 			if !ok {
-				return nil, fmt.Errorf("line %d: can't read day %q (try today, tomorrow or 9/10/2029)", n, head)
+				return nil, fmt.Errorf("line %d: can't read day %q (try today, tomorrow, 9/10/2029 or every weekday)", n, head)
 			}
 			if d.Before(today) {
 				return nil, fmt.Errorf("line %d: %s has already passed", n, d.Format("Mon 02 Jan 2006"))
 			}
-			day = d
+			day, every = d, 0
 		case strings.HasPrefix(line, "# "):
-			list, day = cleanList(line[2:]), today
+			list, day, every = cleanList(line[2:]), today, 0
 		default:
 			m := draftLine.FindStringSubmatch(line)
 			if m == nil {
 				return nil, fmt.Errorf("line %d: tasks start with - [ ] (got %q)", n, line)
 			}
-			t := todo{List: list, Text: strings.TrimSpace(m[1]), Due: day}
+			t := todo{List: list, Text: strings.TrimSpace(m[1]), Due: day, Every: every}
+			if every != 0 {
+				t.Due = clockOf(0, 0)
+			}
 			if t.Text == "" {
 				continue
 			}
@@ -89,9 +102,9 @@ func parseDraft(text, list string, now time.Time) ([]todo, error) {
 				if err != nil {
 					return nil, fmt.Errorf("line %d: %v", n, err)
 				}
-				t.Due = time.Date(day.Year(), day.Month(), day.Day(), h, mm, 0, 0, time.Local)
+				t.Due = on(t.Due, clockOf(h, mm))
 				t.Remind, t.Text = true, tm[2]
-				if !t.Due.After(now) {
+				if every == 0 && !t.Due.After(now) {
 					return nil, fmt.Errorf("line %d: %s has already passed", n, t.Due.Format("Mon 02 Jan 15:04"))
 				}
 			}
@@ -105,10 +118,10 @@ func parseDraft(text, list string, now time.Time) ([]todo, error) {
 // offers to reopen the draft when something in it can't be read.
 func editTasks(list, when string, in io.Reader, out io.Writer) error {
 	if when != "" {
-		if _, remind, err := parseWhen(when, time.Now()); err != nil {
+		if t, err := parseWhen(when, time.Now()); err != nil {
 			return err
-		} else if remind {
-			return fmt.Errorf("--time with the editor takes a day, not a time (put times on the tasks)")
+		} else if t.Remind || t.Every != 0 {
+			return fmt.Errorf("--time with the editor takes a day, not a time or a repeat (put those in the draft)")
 		}
 	}
 	f, err := os.CreateTemp("", "gg-tasks-*.md")
@@ -166,14 +179,10 @@ func addDrafted(todos []todo, out io.Writer) error {
 	}
 	now := time.Now()
 	for _, t := range todos {
-		if _, err := call(request{Op: "todo.add", Text: t.Text, List: t.List, At: t.Due, Remind: t.Remind}); err != nil {
+		if _, err := call(request{Op: "todo.add", Text: t.Text, List: t.List, At: t.Due, Remind: t.Remind, Every: t.Every}); err != nil {
 			return err
 		}
-		kind := "task"
-		if t.Remind {
-			kind = "reminder"
-		}
-		fmt.Fprintf(out, "added %s to %s · %s · %s\n", kind, t.List, describeWhen(t, now), t.Text)
+		fmt.Fprintf(out, "added %s to %s · %s · %s\n", t.kind(), t.List, describeWhen(t, now), t.Text)
 	}
 	return nil
 }

@@ -13,6 +13,7 @@ gg add [list]         write tasks in $EDITOR
 gg add work "fix the bug" -t tomorrow-9am
 gg ls [list]          print what's coming up, by day
 gg ls today           print a whole day (also yesterday, tomorrow, 9/10/2029; several at once work)
+gg routines           your routines on a week grid (gg r)
 gg pomodoro           open the pomodoro (gg pomo)
 gg settings           open the settings
 gg help               every command, the time formats and the keys
@@ -35,6 +36,21 @@ length picker: `h`/`l` switch hours/minutes, `j`/`k` ±1, `J`/`K` ±10, or just 
 
 `gg add work "text" -t WHEN` (or `--time`) adds one task. no time means today. `WHEN` is a day (`tomorrow`, `9/10/2029`, day/month/year), a time (`13:00`, `5pm`, today), or both joined by `-` (`tomorrow-9am`, `9/10/2029-13:00`). a time makes it a reminder. past times are refused.
 
+### routines
+
+for things you do on set days, like checking in and out of work:
+
+```
+gg add work "check in" -t "weekdays 9:30"
+gg add work "check out" -t "weekdays 6pm"
+```
+
+the days can be `daily` / `every day`, `weekdays`, `weekends`, `mon-fri`, `mon to fri`, `every mon, thu`, `mon, wed and fri`; the time goes before or after, with a space or `-` (`weekdays-6pm` works too). the time is optional. one bare day (`monday 9am`) is refused since it reads like a date; say `every monday 9am`. in the task screen, the add/edit form has a **repeat** row: tab to it and pick the days (`space` toggles, `w` weekdays, `d` daily, `e` weekends, `0` none); the when box then takes just a time.
+
+on each of its days a routine gets a task under that day, which notifies you at its time like any reminder. check it off and you're done for the day. if you don't, it's OVERDUE and `overdue_nag` keeps nudging you until you do, or until the day ends. after that it counts as a missed day instead of piling up. a routine added after its time today starts tomorrow.
+
+`gg routines` (or `gg r`) shows every routine on a week grid: `✓` done, `!` missed (or late today), `○` to do, `·` nothing that day, plus how many you did this week. `space` checks off today's, `h`/`l` step through weeks, `a`/`e`/`x` add, edit and delete routines. in the task screen they're listed under REPEATING (`↻`); `space` there checks off today's too, and `e`/`x` on a routine or its task edits or deletes the routine (deleting always asks, even with `X`).
+
 `gg add [list]` opens `$EDITOR` on a draft so you can write a bunch at once:
 
 ```markdown
@@ -46,7 +62,7 @@ length picker: `h`/`l` switch hours/minutes, `j`/`k` ±1, `J`/`K` ±10, or just 
 - [ ] call mom
 ```
 
-`# list` picks the list (a new name makes a new list), `## day` the day, a time in front makes a reminder.
+`# list` picks the list (a new name makes a new list), `## day` the day, a time in front makes a reminder. a repeat heading (`## weekdays`, `## daily`, `## every mon, thu`, `## mon-fri`) makes the tasks below it routines.
 
 each list is a plain markdown file in `~/.local/share/gg/tasks` (change it with `tasks_dir`). gg keeps them sorted by date, times first:
 
@@ -60,7 +76,21 @@ each list is a plain markdown file in `~/.local/share/gg/tasks` (change it with 
 - [x] write the report
 ```
 
-you can edit them by hand too; the daemon notices within a couple of seconds. (lines that aren't headings or tasks get dropped the next time gg rewrites that file.)
+routines go at the top under a repeat heading (write `## weekdays`, `## daily`, `## mon-fri` ... by hand; gg writes it back as `## every weekday`). each day's task is written under that day, so the file doubles as a log of when you did them, and of the days you didn't:
+
+```markdown
+## every weekday
+
+- [ ] 09:30 check in
+- [ ] 18:00 check out
+
+## 2026-10-02 Fri
+
+- [x] 09:30 check in
+- [ ] 18:00 check out
+```
+
+you can edit them by hand too; the daemon notices within a couple of seconds, and rereads them before it writes anything, so a hand edit is never overwritten. (lines that aren't headings or tasks get dropped the next time gg rewrites that file.)
 
 ## config
 

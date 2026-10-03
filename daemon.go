@@ -50,6 +50,7 @@ type request struct {
 	Text   string `json:"text,omitempty"`
 	List   string `json:"list,omitempty"`
 	Remind bool   `json:"remind,omitempty"`
+	Every  repeat `json:"every,omitempty"`
 
 	State *State `json:"state,omitempty"` // restore: what the previous daemon was running
 }
@@ -72,6 +73,7 @@ type daemon struct {
 	tasks     taskStore
 	ticks     int
 	lastNag   time.Time // last overdue nudge (or daemon start)
+	today     time.Time // the day the routines' tasks are for
 	ringSince time.Time // when the pomodoro end sound started
 }
 
@@ -134,7 +136,11 @@ func (d *daemon) serve(conn net.Conn) {
 		case "watch":
 			d.watchers[conn] = enc
 		case "get":
+			if d.freshen() {
+				d.changed()
+			}
 		default:
+			d.freshen() // never write over a hand edit with what was read before it
 			d.apply(req)
 			d.changed()
 		}
@@ -165,13 +171,17 @@ func (d *daemon) tick() {
 	changed := d.st.Pomo.check(d)
 	now := time.Now()
 	// Pick up list files edited by hand every couple of seconds.
-	if d.ticks++; d.ticks%8 == 0 && d.tasks.changedOnDisk() {
-		d.reportTaskErr(d.loadTasks())
+	if d.ticks++; d.ticks%8 == 0 && d.freshen() {
+		changed = true
+	}
+	// At midnight yesterday's unchecked routine tasks go and today's come.
+	if !dayOf(now).Equal(d.today) {
+		d.syncRoutines(now)
 		changed = true
 	}
 	for i := range d.st.Todos {
 		t := &d.st.Todos[i]
-		if !t.Remind || t.Done || t.reminded || now.Before(t.Due) {
+		if !t.Remind || t.Done || t.Every != 0 || t.reminded || now.Before(t.Due) {
 			continue
 		}
 		t.reminded, changed = true, true
@@ -259,7 +269,8 @@ func (d *daemon) apply(r request) {
 		list := cleanList(r.List)
 		d.tasks.nextID++
 		text := strings.Join(strings.Fields(r.Text), " ")
-		d.st.Todos = append(d.st.Todos, todo{ID: d.tasks.nextID, List: list, Text: text, Due: r.At, Remind: r.Remind})
+		d.st.Todos = append(d.st.Todos, todo{ID: d.tasks.nextID, List: list, Text: text, Due: r.At, Remind: r.Remind, Every: r.Every, since: time.Now()})
+		d.syncRoutines(time.Now())
 		d.saveLists(list)
 	case "todo.edit":
 		for i := range d.st.Todos {
@@ -268,11 +279,14 @@ func (d *daemon) apply(r request) {
 				continue
 			}
 			old := t.List
-			if !t.Due.Equal(r.At) || t.Remind != r.Remind {
+			if !t.Due.Equal(r.At) || t.Remind != r.Remind || t.Every != r.Every {
 				t.reminded = r.Remind && !r.At.After(time.Now())
+				t.since = time.Now()
 			}
-			t.List, t.Text, t.Due, t.Remind = cleanList(r.List), strings.Join(strings.Fields(r.Text), " "), r.At, r.Remind
-			d.saveLists(old, t.List)
+			t.List, t.Text, t.Due, t.Remind, t.Every = cleanList(r.List), strings.Join(strings.Fields(r.Text), " "), r.At, r.Remind, r.Every
+			list := t.List
+			d.syncRoutines(time.Now()) // today's task follows its routine
+			d.saveLists(old, list)
 			break
 		}
 	case "list.remove":
@@ -283,7 +297,7 @@ func (d *daemon) apply(r request) {
 		d.reportTaskErr(d.loadTasks())
 	case "todo.toggle":
 		for i := range d.st.Todos {
-			if t := &d.st.Todos[i]; t.ID == r.ID {
+			if t := &d.st.Todos[i]; t.ID == r.ID && t.Every == 0 {
 				t.Done = !t.Done
 				d.saveLists(t.List)
 			}
@@ -292,6 +306,7 @@ func (d *daemon) apply(r request) {
 		for i, t := range d.st.Todos {
 			if t.ID == r.ID {
 				d.st.Todos = slices.Delete(d.st.Todos, i, i+1)
+				d.syncRoutines(time.Now())
 				d.saveLists(t.List)
 				break
 			}
@@ -299,7 +314,8 @@ func (d *daemon) apply(r request) {
 	case "todo.clear": // drop finished tasks from one list, or every list
 		var touched []string
 		d.st.Todos = slices.DeleteFunc(d.st.Todos, func(t todo) bool {
-			if t.Done && (r.List == "" || t.List == r.List) {
+			// A routine's finished task stays, or it would come back unchecked.
+			if t.Done && t.Of == 0 && (r.List == "" || t.List == r.List) {
 				touched = append(touched, t.List)
 				return true
 			}
@@ -313,9 +329,9 @@ func (d *daemon) apply(r request) {
 // loadTasks (re)reads every list file. Reminders keep their sent state
 // across reloads, and ones already past when first read don't fire.
 func (d *daemon) loadTasks() error {
-	sent := map[string]bool{}
+	sent, since := map[string]bool{}, map[string]time.Time{}
 	for _, t := range d.st.Todos {
-		sent[t.key()] = t.reminded
+		sent[t.key()], since[t.key()] = t.reminded, t.since
 	}
 	d.tasks.dir = expandHome(d.cfg.TasksDir)
 	todos, lists, err := d.tasks.load()
@@ -324,12 +340,36 @@ func (d *daemon) loadTasks() error {
 	}
 	now := time.Now()
 	for i := range todos {
-		t := &todos[i]
+		todos[i].since = since[todos[i].key()]
+	}
+	d.st.Todos, d.st.Lists, d.st.TasksDir = todos, lists, d.tasks.dir
+	d.syncRoutines(now)
+	for i := range d.st.Todos {
+		t := &d.st.Todos[i]
 		r, known := sent[t.key()]
 		t.reminded = r || (!known && t.Remind && t.Due.Before(now))
 	}
-	d.st.Todos, d.st.Lists, d.st.TasksDir = todos, lists, d.tasks.dir
 	return nil
+}
+
+// syncRoutines gives each routine that falls on today its task for today,
+// and writes down what changed.
+func (d *daemon) syncRoutines(now time.Time) {
+	var touched []string
+	d.today = dayOf(now)
+	d.st.Todos, touched = syncRoutines(d.st.Todos, now, &d.tasks.nextID)
+	if len(touched) > 0 {
+		d.saveLists(touched...)
+	}
+}
+
+// freshen rereads the list files when one was edited by hand.
+func (d *daemon) freshen() bool {
+	if !d.tasks.changedOnDisk() {
+		return false
+	}
+	d.reportTaskErr(d.loadTasks())
+	return true
 }
 
 // nagOverdue sends one notification listing unchecked past-due tasks.

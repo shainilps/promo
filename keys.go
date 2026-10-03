@@ -14,6 +14,7 @@ var keys = struct {
 	Edit, Toggle, Save, Undo, Leave, Commit, Discard, Accept          key.Binding
 	ListNext, ListPrev, Check, AddTask, DelTask, ClearDone, NextField key.Binding
 	PrevField, AddToList, EditTask, OpenFile, DelList, DelTaskNow     key.Binding
+	WeekPrev, WeekNext, ThisWeek                                      key.Binding
 }{
 	ForceQuit: bind([]string{"ctrl+c"}, "ctrl+c", "quit"),
 	Help:      bind([]string{"?"}, "?", "more keys"),
@@ -63,6 +64,10 @@ var keys = struct {
 	ClearDone:  bind([]string{"c"}, "c", "clear done"),
 	NextField:  bind([]string{"tab", "down"}, "tab", "next field"),
 	PrevField:  bind([]string{"shift+tab", "up"}, "shift+tab", "prev field"),
+
+	WeekPrev: bind([]string{"h", "left"}, "h", "last week"),
+	WeekNext: bind([]string{"l", "right"}, "l", "next week"),
+	ThisWeek: bind([]string{"t"}, "t", "this week"),
 }
 
 // helpKeys adapts a list of bindings to help.KeyMap.

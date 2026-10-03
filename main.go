@@ -22,6 +22,7 @@ COMMANDS
   gg ls [LIST]             print what's coming up, by day
   gg ls DAY... [LIST]      print whole days, open tasks first, then done
                            e.g. gg ls today · gg ls yesterday today work
+  gg routines              your routines on a week grid: done, missed, to do (gg r)
   gg pomodoro              open the pomodoro (gg pomo for short)
   gg settings              open the settings
   gg help                  show this help
@@ -33,6 +34,9 @@ WHEN  (-t or --time; dates are day/month/year, past times are refused)
   13:00, 1pm               a reminder today at that time
   tomorrow-9am, 9/10/2029-13:00
                            a reminder on that day at that time
+  "weekdays 6pm", "daily 9am", "mon-fri 9:30", "every mon, thu 7pm", weekends
+                           a routine: it repeats on those days, with or without a time
+                           (a space or - between the parts; quote it when it has spaces)
 
 DAY   (for ls)
   today, yesterday, tomorrow, 9/10/2029, 9/10
@@ -42,6 +46,7 @@ EDITOR DRAFT  (gg add)
   ## tomorrow              the day for the tasks below (today if there is none)
   - [ ] 09:00 standup      a reminder at 09:00
   - [ ] review the pr      a plain task
+  ## weekdays              the tasks below repeat (daily, weekends, mon-fri, every mon, thu)
 
 TASK KEYS  (press ? in gg for all of them)
   j/k move · space done · a add · A add to another list · e edit · E edit the list file
@@ -51,6 +56,9 @@ TASK KEYS  (press ? in gg for all of them)
 REMINDERS
   a task with a time notifies you when it's due. unchecked tasks whose time has passed
   move to OVERDUE at the top, and every overdue_nag (default 1h) you get a nudge.
+  a routine gets a task on each of its days; check that off, and it's back next time.
+  left unchecked, it's overdue (and nags) until the day ends, then a missed day.
+  gg routines shows them on a week grid. in the add form, tab to repeat to pick days.
 
 FILES
   config   %s
@@ -139,6 +147,8 @@ func main() {
 	case cmd == "pomodoro" || cmd == "pomo":
 		a.send(request{Op: "pomo.begin"}) // no-op while one is running
 		a.screen = screenPomodoro
+	case cmd == "routines" || cmd == "routine" || cmd == "r":
+		a.screen = screenRoutines
 	case cmd == "settings" || cmd == "config":
 		a.settings.open(a)
 		a.screen = screenSettings
